@@ -43,6 +43,7 @@ scripts/acceptance_run.py
 必须只覆盖 generated block，不覆盖人工代码。
 必须在执行后生成报告。
 必须区分 pass、fail、skip、pending、uncertain。
+必须在初始化 .acceptance/config.yaml 时保持 context 为空，除非用户明确提供项目验收执行上下文。
 必须在涉及生产资源、外部付费服务、真实短信邮件、删除数据、新依赖、大范围改动时再次请求用户确认。
 ```
 
@@ -64,6 +65,7 @@ scripts/acceptance_run.py
 禁止全量重建无关模块的验收资产。
 禁止覆盖人工维护的 helper、fixture、测试辅助代码。
 禁止把 skip、pending、uncertain 当作通过。
+禁止把 AGENTS.md 里的全局规则、Skill 安全规则、CodeGraph 可用性、AI 推断结果或默认提示写入 config.context。
 禁止自动操作生产数据库、真实支付、真实短信、真实邮件或不可逆脚本。
 ```
 
@@ -125,11 +127,15 @@ version: 1
 root: .acceptance
 
 context: |
-  可选。这里可以写任意项目验收上下文。
-  例如 MySQL/Redis/MQ 连接方式、HTTP base_url、脚本前置命令、mock 规则、CI 限制等。
 ```
 
-`context` 是项目级自由文本说明，不要求结构化，可以为空。如果存在，必须在生成或执行验收逻辑前优先读取并尽量遵守。`context` 只描述项目执行上下文，不覆盖 `acceptance.md` 中的业务验收标准。
+`context` 是项目级自由文本说明，不要求结构化，可以为空。
+
+初始化 `.acceptance/config.yaml` 时，`context` 必须保持为空，除非用户明确提供项目验收执行上下文。
+
+不要把 `AGENTS.md` 中已有的全局规则、Skill 安全规则、CodeGraph 可用性、AI 推断结果或默认提示写入 `context`。
+
+如果用户填写了 `context`，必须在生成或执行验收逻辑前优先读取并尽量遵守。`context` 只描述项目执行上下文，不覆盖 `acceptance.md` 中的业务验收标准。
 
 ## 验收文件
 

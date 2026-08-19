@@ -43,6 +43,7 @@ Update only affected units and scenarios.
 Overwrite only generated blocks, never manual code.
 Write a report after execution.
 Distinguish pass, fail, skip, pending, and uncertain.
+Keep context empty when initializing .acceptance/config.yaml unless the user explicitly provides project acceptance execution context.
 Ask for confirmation again before production resources, paid external services, real SMS/email, data deletion, new dependencies, or broad rewrites.
 ```
 
@@ -64,6 +65,7 @@ Never introduce a new BDD or test framework by default.
 Never regenerate unrelated acceptance assets.
 Never overwrite manual helpers, fixtures, or test utility code.
 Never treat skip, pending, or uncertain as pass.
+Never write AGENTS.md rules, skill safety rules, CodeGraph availability, AI inferences, or default hints into config.context.
 Never operate on production databases, real payments, real SMS, real email, or irreversible scripts automatically.
 ```
 
@@ -125,11 +127,15 @@ version: 1
 root: .acceptance
 
 context: |
-  Optional free-form project acceptance context.
-  Use this for MySQL/Redis/MQ connection rules, HTTP base_url, setup commands, mock rules, CI limits, and project-specific notes.
 ```
 
-`context` is optional free-form project text. It does not need a schema and may be empty. If present, read and follow it before generating or executing validation logic. `context` describes execution environment and project constraints; it does not override business expectations in `acceptance.md`.
+`context` is optional free-form project text. It does not need a schema and may be empty.
+
+When initializing `.acceptance/config.yaml`, keep `context` empty unless the user explicitly provides project acceptance execution context.
+
+Do not write existing `AGENTS.md` rules, skill safety rules, CodeGraph availability, AI inferences, or default hints into `context`.
+
+If the user fills `context`, read and follow it before generating or executing validation logic. `context` describes execution environment and project constraints; it does not override business expectations in `acceptance.md`.
 
 ## Acceptance File
 

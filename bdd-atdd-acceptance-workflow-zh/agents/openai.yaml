@@ -1,0 +1,7 @@
+interface:
+  display_name: "BDD/ATDD 验收工作流"
+  short_description: "验收文件驱动的 BDD/ATDD 验收流程"
+  default_prompt: "使用 $bdd-atdd-acceptance-workflow-zh，根据 acceptance.md 或我的验收条件维护 BDD/ATDD 验收工作流。"
+
+policy:
+  allow_implicit_invocation: true

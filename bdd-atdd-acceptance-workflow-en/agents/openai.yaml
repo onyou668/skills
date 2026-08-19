@@ -1,0 +1,7 @@
+interface:
+  display_name: "BDD/ATDD Acceptance Workflow"
+  short_description: "Acceptance-file driven BDD/ATDD workflow"
+  default_prompt: "Use $bdd-atdd-acceptance-workflow-en to maintain a BDD/ATDD acceptance workflow from acceptance.md or my acceptance criteria."
+
+policy:
+  allow_implicit_invocation: true

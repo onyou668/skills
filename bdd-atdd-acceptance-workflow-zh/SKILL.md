@@ -17,6 +17,15 @@ description: "以 acceptance.md 验收文件为唯一标准源，维护、确认
 
 需要生成或更新实际验收资产时，阅读 [references/workflow-details.md](references/workflow-details.md)。
 
+优先复用内置脚本执行确定性步骤：
+
+```text
+scripts/acceptance_detect.py
+scripts/acceptance_sync.py
+scripts/acceptance_compile.py
+scripts/acceptance_run.py
+```
+
 ## 必须要求
 
 ```text
@@ -232,6 +241,16 @@ spec / 用户描述 -> acceptance.md -> 增量 feature 预览 -> 等待用户确
 ```
 
 如果计划涉及新依赖、大范围改动、生产资源、外部真实服务或不可逆操作，必须再次等待用户确认。普通低风险生成可以在输出计划后继续执行。
+
+## 脚本入口
+
+使用 `scripts/acceptance_detect.py` 识别项目语言、测试框架、BDD 工具、配置上下文和可能的 HTTP 路由。
+
+使用 `scripts/acceptance_sync.py` 初始化验收目录、从 spec 或口头条件维护 `acceptance.md`，并输出增量 feature 预览。该脚本不生成验证逻辑。
+
+用户确认 feature 后，使用 `scripts/acceptance_compile.py --confirmed` 生成 `feature.feature`、`bindings.yaml`、`compiled/*`、`acceptance.lock.yaml` 和安全的生成计划脚手架。
+
+使用 `scripts/acceptance_run.py` 根据 `compiled/bindings.json` 执行已绑定命令并写入报告。没有明确命令或状态为 `pending`/`uncertain` 的场景不得当作通过。
 
 ## 代码感知生成
 

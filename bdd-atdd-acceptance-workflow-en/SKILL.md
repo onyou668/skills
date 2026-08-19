@@ -17,6 +17,15 @@ Do not bypass `acceptance.md` and generate tests directly from a spec, spoken re
 
 Read [references/workflow-details.md](references/workflow-details.md) when generating or updating concrete acceptance assets.
 
+Prefer the bundled scripts for deterministic steps:
+
+```text
+scripts/acceptance_detect.py
+scripts/acceptance_sync.py
+scripts/acceptance_compile.py
+scripts/acceptance_run.py
+```
+
 ## Mandatory Requirements
 
 ```text
@@ -232,6 +241,16 @@ whether DB / Redis / MQ / files / external services are involved
 ```
 
 If the plan involves new dependencies, broad rewrites, production resources, real external services, or irreversible operations, wait for confirmation again. For ordinary low-risk generation, continue after showing the plan.
+
+## Script Entry Points
+
+Use `scripts/acceptance_detect.py` to detect project language, test frameworks, BDD tools, config context, and possible HTTP routes.
+
+Use `scripts/acceptance_sync.py` to initialize acceptance directories, maintain `acceptance.md` from specs or spoken criteria, and show the incremental feature preview. This script does not generate validation logic.
+
+After feature confirmation, use `scripts/acceptance_compile.py --confirmed` to generate `feature.feature`, `bindings.yaml`, `compiled/*`, `acceptance.lock.yaml`, and safe generated-plan scaffolds.
+
+Use `scripts/acceptance_run.py` to execute bound commands from `compiled/bindings.json` and write reports. Scenarios without clear commands or with `pending`/`uncertain` status must not be treated as pass.
 
 ## Code-Aware Generation
 

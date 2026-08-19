@@ -269,9 +269,9 @@ scenarios:
     reason: 验收文件没有说明账号锁定持续时间
 ```
 
-## 可选脚本
+## 内置脚本
 
-后续版本可以包含：
+本 Skill 包含：
 
 ```text
 scripts/acceptance_detect.py
@@ -280,4 +280,76 @@ scripts/acceptance_compile.py
 scripts/acceptance_run.py
 ```
 
-脚本只能执行确定性操作，不能凭空创造业务期望。如果脚本尚未存在，不要假装已经运行脚本。
+脚本只能执行确定性操作，不能凭空创造业务期望。
+
+### acceptance_detect.py
+
+```bash
+python scripts/acceptance_detect.py --project-root . --pretty
+```
+
+用于识别：
+
+```text
+项目语言
+包管理器
+测试框架
+BDD 工具
+config.context 是否存在
+可能的 HTTP 路由
+建议测试命令
+```
+
+### acceptance_sync.py
+
+```bash
+python scripts/acceptance_sync.py --project-root . --unit login --criteria "验证码必须为 6 位数字" --source spoken
+```
+
+用于：
+
+```text
+初始化 .acceptance
+创建或更新 units/<unit>/acceptance.md
+检查相似场景
+追加新的 AC 场景
+输出增量 feature 预览
+```
+
+该脚本不会生成 `bindings.yaml`、测试代码或执行命令。
+
+### acceptance_compile.py
+
+```bash
+python scripts/acceptance_compile.py --project-root . --unit login --confirmed
+```
+
+用于在用户确认 feature 后生成：
+
+```text
+compiled/acceptance.normalized.yaml
+feature.feature
+bindings.yaml
+compiled/bindings.json
+acceptance.lock.yaml
+generated/*_acceptance_plan.md
+```
+
+该脚本会根据项目检测结果选择候选验收方式，但不会编造业务断言。
+
+### acceptance_run.py
+
+```bash
+python scripts/acceptance_run.py --project-root . --unit login
+```
+
+用于读取 `compiled/bindings.json`，执行已绑定命令，并生成：
+
+```text
+reports/<run-id>.yaml
+reports/<run-id>.json
+reports/latest.yaml
+reports/latest.json
+```
+
+如果场景缺少命令或状态为 `pending`/`uncertain`，默认不会执行，也不会当作通过。

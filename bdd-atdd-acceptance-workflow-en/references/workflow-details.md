@@ -269,9 +269,9 @@ scenarios:
     reason: acceptance.md does not define the account lock duration
 ```
 
-## Optional Future Scripts
+## Bundled Scripts
 
-This skill may later include:
+This skill includes:
 
 ```text
 scripts/acceptance_detect.py
@@ -280,4 +280,76 @@ scripts/acceptance_compile.py
 scripts/acceptance_run.py
 ```
 
-Scripts may only perform deterministic operations and must not invent business expectations. If scripts do not exist, do not pretend they were run.
+Scripts may only perform deterministic operations and must not invent business expectations.
+
+### acceptance_detect.py
+
+```bash
+python scripts/acceptance_detect.py --project-root . --pretty
+```
+
+Detects:
+
+```text
+project languages
+package managers
+test frameworks
+BDD tools
+whether config.context exists
+possible HTTP routes
+suggested test commands
+```
+
+### acceptance_sync.py
+
+```bash
+python scripts/acceptance_sync.py --project-root . --unit login --criteria "Verification code must be 6 digits" --source spoken
+```
+
+Use it to:
+
+```text
+initialize .acceptance
+create or update units/<unit>/acceptance.md
+check similar scenarios
+append a new AC scenario
+show incremental feature preview
+```
+
+This script never generates `bindings.yaml`, test code, or execution commands.
+
+### acceptance_compile.py
+
+```bash
+python scripts/acceptance_compile.py --project-root . --unit login --confirmed
+```
+
+After feature confirmation, generates:
+
+```text
+compiled/acceptance.normalized.yaml
+feature.feature
+bindings.yaml
+compiled/bindings.json
+acceptance.lock.yaml
+generated/*_acceptance_plan.md
+```
+
+It chooses a candidate validation method from project detection, but does not invent business assertions.
+
+### acceptance_run.py
+
+```bash
+python scripts/acceptance_run.py --project-root . --unit login
+```
+
+Reads `compiled/bindings.json`, executes bound commands, and writes:
+
+```text
+reports/<run-id>.yaml
+reports/<run-id>.json
+reports/latest.yaml
+reports/latest.json
+```
+
+Scenarios with no command or `pending`/`uncertain` status are not executed by default and are not treated as pass.

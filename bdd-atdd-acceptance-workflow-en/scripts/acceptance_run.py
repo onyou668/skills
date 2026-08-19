@@ -19,6 +19,15 @@ from acceptance_common import (
 )
 
 
+NO_TEST_PATTERNS = [
+    "no tests to run",
+    "no test files",
+    "collected 0 items",
+    "0 tests",
+    "no tests found",
+]
+
+
 def write_report_yaml(path: Path, report: dict) -> None:
     lines = [
         f"unit_id: {report['unit_id']}",
@@ -35,6 +44,7 @@ def write_report_yaml(path: Path, report: dict) -> None:
                 f"  - id: {scenario['id']}",
                 f"    status: {scenario['status']}",
                 f"    command: {scenario.get('command', '')!r}",
+                f"    runner: {scenario.get('runner', '')!r}",
                 f"    reason: {scenario.get('reason', '')!r}",
             ]
         )
@@ -71,19 +81,29 @@ def main() -> int:
         print("No matching scenarios.")
         return 1
 
-    summary = {"pass": 0, "fail": 0, "skip": 0, "pending": 0, "uncertain": 0}
+    summary = {"pass": 0, "fail": 0, "skip": 0, "pending": 0, "uncertain": 0, "error": 0, "timeout": 0}
     results = []
     for scenario in scenarios:
         command = scenario.get("command", "")
         status = scenario.get("status", "pending")
+        runner = scenario.get("runner", "")
         result = {
             "id": scenario.get("id"),
             "title": scenario.get("title", ""),
             "command": command,
+            "runner": runner,
             "reason": scenario.get("reason", ""),
             "selected_type": scenario.get("selected_type", ""),
         }
-        if status in {"pending", "uncertain", "manual", "draft", "deprecated"} and not args.include_pending:
+        if runner.endswith(".md") and not args.include_pending:
+            result["status"] = "pending"
+            result["reason"] = "Runner is a generated plan document, not executable acceptance code."
+            summary["pending"] += 1
+        elif runner and not (project_root / runner).exists() and not args.include_pending:
+            result["status"] = "pending"
+            result["reason"] = "Runner file does not exist yet; generate executable acceptance code before running."
+            summary["pending"] += 1
+        elif status in {"pending", "uncertain", "manual", "draft", "deprecated"} and not args.include_pending:
             mapped = "pending" if status in {"manual", "draft", "deprecated"} else status
             result["status"] = mapped
             result["reason"] = f"Scenario binding status is {status}; use --include-pending to run pending commands."
@@ -103,7 +123,18 @@ def main() -> int:
         else:
             command_result = run_command(command, project_root, args.timeout)
             result.update(command_result)
-            if command_result.get("exit_code") == 0:
+            if command_result.get("timeout"):
+                result["status"] = "timeout"
+                result["reason"] = "Command exceeded timeout; batch execution continued."
+                summary["timeout"] += 1
+            elif command_result.get("exit_code") == 0 and any(
+                pattern in ((command_result.get("stdout") or "") + "\n" + (command_result.get("stderr") or "")).lower()
+                for pattern in NO_TEST_PATTERNS
+            ):
+                result["status"] = "pending"
+                result["reason"] = "Command exited 0 but no executable acceptance tests were discovered."
+                summary["pending"] += 1
+            elif command_result.get("exit_code") == 0:
                 result["status"] = "pass"
                 summary["pass"] += 1
             else:
@@ -111,7 +142,17 @@ def main() -> int:
                 summary["fail"] += 1
         results.append(result)
 
-    overall = "fail" if summary["fail"] else "uncertain" if summary["uncertain"] else "pending" if summary["pending"] else "pass"
+    overall = (
+        "fail"
+        if summary["fail"] or summary["error"] or summary["timeout"]
+        else "uncertain"
+        if summary["uncertain"]
+        else "pending"
+        if summary["pending"]
+        else "skip"
+        if summary["skip"]
+        else "pass"
+    )
     report = {
         "unit_id": unit_id,
         "run_id": now_id(),
@@ -133,7 +174,7 @@ def main() -> int:
     print(f"Report: {report_yaml}")
     print(f"Status: {overall}")
     print(f"Summary: {summary}")
-    return 1 if summary["fail"] else 0
+    return 0 if overall == "pass" else 1
 
 
 if __name__ == "__main__":

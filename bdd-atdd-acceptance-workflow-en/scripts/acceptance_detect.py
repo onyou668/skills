@@ -12,10 +12,22 @@ from acceptance_common import acceptance_root, read_config_context, read_text
 
 
 TEXT_SUFFIXES = {".go", ".py", ".js", ".ts", ".tsx", ".java", ".rs", ".kt", ".yml", ".yaml", ".toml", ".json", ".xml"}
+IGNORED_DIRS = {".git", "node_modules", "vendor", "target", "dist", "build", ".acceptance", "temp", "tmp"}
 
 
 def file_exists(root: Path, *names: str) -> bool:
     return any((root / name).exists() for name in names)
+
+
+def find_first(root: Path, name: str) -> Path | None:
+    direct = root / name
+    if direct.exists():
+        return direct
+    for path in root.rglob(name):
+        if any(part in IGNORED_DIRS for part in path.parts):
+            continue
+        return path
+    return None
 
 
 def read_if_exists(path: Path) -> str:
@@ -46,14 +58,14 @@ def scan_route_hints(root: Path, limit: int = 300, max_files: int = 800) -> list
         re.compile(r"@(Get|Post|Put|Patch|Delete)Mapping\s*\(\s*[\"']?([^\"')]+)", re.I),
     ]
     results: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
     scanned = 0
-    ignored = {".git", "node_modules", "vendor", "target", "dist", "build", ".acceptance"}
     for path in root.rglob("*"):
         if len(results) >= limit:
             break
         if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
             continue
-        if any(part in ignored for part in path.parts):
+        if any(part in IGNORED_DIRS for part in path.parts):
             continue
         scanned += 1
         if scanned > max_files:
@@ -64,6 +76,10 @@ def scan_route_hints(root: Path, limit: int = 300, max_files: int = 800) -> list
             continue
         for pattern in patterns:
             for match in pattern.finditer(text):
+                key = (str(path.relative_to(root)), match.group(1).upper(), match.group(2))
+                if key in seen:
+                    continue
+                seen.add(key)
                 results.append(
                     {
                         "file": str(path.relative_to(root)),
@@ -76,16 +92,66 @@ def scan_route_hints(root: Path, limit: int = 300, max_files: int = 800) -> list
     return results
 
 
+def scan_local_test_styles(root: Path, max_files: int = 800) -> dict:
+    styles: dict[str, list[dict]] = {}
+    scanned = 0
+    patterns = {
+        "go_httptest": ["httptest.NewRecorder", "httptest.NewRequest", "httptest.NewServer"],
+        "go_gin_handler": ["gin.CreateTestContext"],
+        "go_sqlmock": ["sqlmock.New", "github.com/DATA-DOG/go-sqlmock"],
+        "python_test_client": ["TestClient(", ".test_client()", "APIClient("],
+        "node_supertest": ["supertest", "request(app)", "request(server)"],
+        "java_mockmvc": ["MockMvc", "WebTestClient"],
+        "rust_http_test": ["axum::Router", "actix_web::test", "rocket::local"],
+        "fake_http": ["httptest.NewServer", "MockTransport", "responses.activate", "nock(", "wiremock"],
+    }
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
+            continue
+        if any(part in IGNORED_DIRS for part in path.parts):
+            continue
+        scanned += 1
+        if scanned > max_files:
+            break
+        try:
+            text = read_text(path)
+        except Exception:
+            continue
+        for style, needles in patterns.items():
+            if any(needle in text for needle in needles):
+                styles.setdefault(style, []).append({"file": str(path.relative_to(root))})
+    return {key: value[:20] for key, value in sorted(styles.items())}
+
+
+def scan_local_scripts(root: Path, limit: int = 200) -> list[dict]:
+    results: list[dict] = []
+    script_dirs = {"scripts", "script", "cmd", "tools", "bin", "jobs", "tasks"}
+    for path in root.rglob("*"):
+        if len(results) >= limit:
+            break
+        if not path.is_file() or any(part in IGNORED_DIRS for part in path.parts):
+            continue
+        if not (set(path.parts) & script_dirs or path.suffix in {".ps1", ".sh", ".bat", ".cmd"}):
+            continue
+        if path.suffix not in TEXT_SUFFIXES and path.suffix not in {".ps1", ".sh", ".bat", ".cmd"}:
+            continue
+        results.append({"file": str(path.relative_to(root)), "suffix": path.suffix})
+    return results
+
+
 def detect(root: Path) -> dict:
     pkg = package_json(root)
     pyproject = read_if_exists(root / "pyproject.toml")
     requirements = "\n".join(read_if_exists(root / name) for name in ["requirements.txt", "requirements-dev.txt"])
-    cargo = read_if_exists(root / "Cargo.toml")
-    pom = read_if_exists(root / "pom.xml")
+    go_mod = find_first(root, "go.mod")
+    cargo_path = find_first(root, "Cargo.toml")
+    pom_path = find_first(root, "pom.xml")
+    cargo = read_if_exists(cargo_path) if cargo_path else ""
+    pom = read_if_exists(pom_path) if pom_path else ""
     gradle = "\n".join(read_if_exists(root / name) for name in ["build.gradle", "build.gradle.kts"])
 
     languages = []
-    if file_exists(root, "go.mod"):
+    if go_mod:
         languages.append("go")
     if file_exists(root, "pyproject.toml", "requirements.txt", "setup.py", "pytest.ini"):
         languages.append("python")
@@ -93,11 +159,11 @@ def detect(root: Path) -> dict:
         languages.append("node")
     if file_exists(root, "pom.xml", "build.gradle", "build.gradle.kts"):
         languages.append("java")
-    if file_exists(root, "Cargo.toml"):
+    if cargo_path:
         languages.append("rust")
 
     package_managers = []
-    if file_exists(root, "go.mod"):
+    if go_mod:
         package_managers.append("go")
     if file_exists(root, "pnpm-lock.yaml"):
         package_managers.append("pnpm")
@@ -113,14 +179,14 @@ def detect(root: Path) -> dict:
         package_managers.append("maven")
     if file_exists(root, "build.gradle", "build.gradle.kts", "gradlew", "gradlew.bat"):
         package_managers.append("gradle")
-    if file_exists(root, "Cargo.toml"):
+    if cargo_path:
         package_managers.append("cargo")
 
     test_frameworks = []
     bdd_tools = []
     if "go" in languages:
         test_frameworks.append("go test")
-        if "godog" in read_if_exists(root / "go.mod"):
+        if go_mod and "godog" in read_if_exists(go_mod):
             bdd_tools.append("godog")
     if "python" in languages:
         if "pytest" in pyproject or "pytest" in requirements or file_exists(root, "pytest.ini", "conftest.py"):
@@ -150,7 +216,11 @@ def detect(root: Path) -> dict:
 
     commands = []
     if "go" in languages:
-        commands.append("go test ./...")
+        module_dir = go_mod.parent if go_mod else root
+        if module_dir == root:
+            commands.append("go test ./...")
+        else:
+            commands.append(f"cd {module_dir.relative_to(root).as_posix()} && go test ./...")
     if "python" in languages:
         commands.append("pytest")
     if "node" in languages:
@@ -173,11 +243,18 @@ def detect(root: Path) -> dict:
         },
         "languages": languages,
         "package_managers": package_managers,
+        "modules": {
+            "go": str(go_mod.parent.relative_to(root)) if go_mod else "",
+            "rust": str(cargo_path.parent.relative_to(root)) if cargo_path else "",
+            "java": str(pom_path.parent.relative_to(root)) if pom_path else "",
+        },
         "test_frameworks": sorted(set(test_frameworks)),
         "bdd_tools": sorted(set(bdd_tools)),
         "suggested_commands": commands,
         "codegraph_available": (root / ".codegraph").exists(),
         "route_hints": scan_route_hints(root),
+        "local_test_styles": scan_local_test_styles(root),
+        "local_scripts": scan_local_scripts(root),
     }
 
 

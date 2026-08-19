@@ -103,6 +103,8 @@ If key information is missing, keep the scenario but mark it `pending` or `uncer
 
 ## Feature Preview Example
 
+Feature files must be standard Gherkin. Use English Gherkin keywords by default; step text may be localized. Do not put execution plans, JSON/YAML, test function names, or commands inside feature files.
+
 ```gherkin
 Feature: Login module acceptance
 
@@ -112,6 +114,96 @@ Feature: Login module acceptance
     Then login must fail
     And the system must return a verification-code length error
 ```
+
+## Execution Plan Preview Example
+
+The execution plan must come from read-only discovery of current code, and every case must contain `input / execute / assert`.
+
+```yaml
+version: 1
+unit_id: client-auth-login
+plans:
+  - scenario_id: AC-CLIENT-AUTH-LOGIN-001
+    title: Email login only allows Gmail and Outlook
+    scope: local
+    remote: false
+    validation_method:
+      type: go_handler_test
+      reason: The project already has Gin handler, httptest, and sqlmock test styles; this validates local login logic without remote HTTP.
+    code_evidence:
+      - path: houduan/server/cmd/server/main.go
+        evidence: POST /api/auth/login -> AuthHandler.Login
+      - path: houduan/server/internal/handlers/auth_handler.go
+        evidence: unifiedLoginReq contains loginType/accountType/areaCode/account/password
+      - path: houduan/server/internal/handlers/auth_revocation_test.go
+        evidence: existing handlerJSONContext/newHandlerMockDB helpers
+    case_coverage:
+      positive_required: true
+      negative_required: true
+      boundary_required: true
+    cases:
+      - id: invalid_format
+        input:
+          request:
+            content_type: application/json
+            json:
+              loginType: password
+              accountType: email
+              areaCode: "233"
+              account: abc
+              password: valid-password
+        execute:
+          mode: local_handler_call
+          local_code: AuthHandler.Login
+          setup:
+            db: sqlmock
+            external_services: fake_or_none
+        assert:
+          response:
+            http_status: 200
+            json:
+              code: 10001
+              message_id: error.auth.email_invalid
+              data: null
+          side_effects:
+            db_queries: none
+            db_writes: none
+            external_calls: none
+      - id: gmail_continue
+        input:
+          request:
+            content_type: application/json
+            json:
+              loginType: password
+              accountType: email
+              areaCode: "233"
+              account: user@gmail.com
+              password: valid-password
+        execute:
+          mode: local_handler_call
+          local_code: AuthHandler.Login
+          setup:
+            db: sqlmock
+        assert:
+          next_observable:
+            db_query:
+              table: users
+              where:
+                email: user@gmail.com
+          external_calls: none
+    generated_assets_preview:
+      - houduan/server/internal/handlers/auth_email_login_acceptance_test.go
+      - .acceptance/units/client-auth-login/bindings.yaml
+      - .acceptance/units/client-auth-login/compiled/bindings.json
+    command_preview:
+      - go test ./internal/handlers -run TestAcceptanceClientAuthLoginEmailDomain -count=1
+    execution_policy:
+      can_modify_business_code: false
+      run_after_second_confirm: true
+      batch_continue_on_failure: true
+```
+
+If no local entry point exists in current code, do not invent scripts or call remote services. Mark the scenario `pending` and explain the gap.
 
 ## Candidate Tools By Language
 
@@ -172,7 +264,7 @@ Generic:
 Hurl
 Newman
 Bruno
-curl wrapper scripts
+curl wrapper scripts only when the user explicitly asks for remote or local-service black-box acceptance
 Shell / PowerShell
 database queries
 Redis queries
@@ -188,13 +280,18 @@ unit_id: login
 
 scenarios:
   AC-LOGIN-001:
-    selected_type: http_api
-    reason: The login module exposes POST /api/login and verification-code validation occurs on the real login entry point, so HTTP acceptance is closest to the business path.
+    selected_type: go_handler_test
+    execution_scope: local
+    remote: false
+    reason: The login module exposes POST /api/login, but acceptance executes through a local handler test instead of remote HTTP.
     alternatives:
-      - go_test_service
+      - go_router_test
+      - go_unit_test
       - godog
-    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength
-    runner: generated/login_acceptance_test.go
+    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength -count=1
+    runner: internal/auth/login_acceptance_test.go
+    plan_doc: generated/ac_login_001_acceptance_plan.md
+    execution_plan: compiled/execution_plan.preview.yaml
     env:
       APP_ENV: test
     assertions:
@@ -246,6 +343,60 @@ eventually:
 
 Use this for script-driven DB changes, worker consumption, scheduled jobs, file generation, log output, Redis state changes, and mocked external callbacks.
 
+## External HTTP-Call Behavior
+
+When validating code that calls an external HTTP provider, validate current code's request construction and response handling by default. Do not call the real provider.
+
+```yaml
+external_http:
+  mode: fake_server
+  assert_request:
+    method: POST
+    path: /provider/send
+    headers:
+      Content-Type: application/json
+    json_contains:
+      to: user@example.com
+  fake_response:
+    status: 200
+    json:
+      ok: true
+  assert_local_result:
+    provider_status: submitted
+```
+
+## Script And Reporting Acceptance
+
+Statistics scripts, repair scripts, and batch scripts run locally against test/sandbox fixtures by default. A successful result cannot be judged only by exit code; assert business results too.
+
+```yaml
+input:
+  fixtures:
+    db:
+      orders:
+        - id: 1
+          status: paid
+          amount: 100
+  args:
+    - --date
+    - "2026-08-19"
+execute:
+  mode: local_script_or_runner
+  command_preview: go test ./internal/stats -run TestAcceptanceDailyReport -count=1
+assert:
+  process:
+    exit_code: 0
+    stdout_contains:
+      - paid_count=1
+  db_after:
+    daily_reports:
+      - report_date: "2026-08-19"
+        paid_count: 1
+  idempotency:
+    rerun: true
+    invariant: daily_reports for date has exactly one row
+```
+
 ## Report Example
 
 ```yaml
@@ -258,6 +409,8 @@ summary:
   skip: 0
   pending: 0
   uncertain: 1
+  error: 0
+  timeout: 0
 
 scenarios:
   - id: AC-LOGIN-001
@@ -267,6 +420,7 @@ scenarios:
   - id: AC-LOGIN-002
     status: uncertain
     reason: acceptance.md does not define the account lock duration
+    suggestion: Add lock duration and error code to acceptance.md
 ```
 
 ## Bundled Scripts
@@ -292,11 +446,14 @@ Detects:
 
 ```text
 project languages
+submodule paths
 package managers
 test frameworks
 BDD tools
 whether config.context exists
 possible HTTP routes
+local test styles and helper clues
+local script entry points
 suggested test commands
 ```
 
@@ -324,10 +481,14 @@ This script never generates `bindings.yaml`, test code, or execution commands.
 python scripts/acceptance_compile.py --project-root . --unit login --confirmed
 ```
 
-After feature confirmation, generates:
+Without `--confirmed`, it prints the feature and `execution_plan_preview` without writing execution assets.
+
+After the user confirms the feature and `execution_plan_preview`, it generates:
 
 ```text
 compiled/acceptance.normalized.yaml
+compiled/execution_plan.preview.yaml
+compiled/execution_plan.preview.json
 feature.feature
 bindings.yaml
 compiled/bindings.json
@@ -335,7 +496,7 @@ acceptance.lock.yaml
 generated/*_acceptance_plan.md
 ```
 
-It chooses a candidate validation method from project detection, but does not invent business assertions.
+The script chooses candidate local validation methods from project detection and writes the suggested executable acceptance test path as `runner` plus the generated plan document as `plan_doc`. It does not invent business assertions, does not generate remote requests, and does not modify business code.
 
 ### acceptance_run.py
 
@@ -353,3 +514,5 @@ reports/latest.json
 ```
 
 Scenarios with no command or `pending`/`uncertain` status are not executed by default and are not treated as pass.
+
+If the real acceptance test file referenced by `runner` does not exist yet, the scenario is marked `pending` and the command is not executed by default. In batch execution, one scenario failure, error, or timeout does not stop later scenarios. The final report summarizes `pass/fail/skip/pending/uncertain/error/timeout`. The runner returns 0 only when the overall status is `pass`; all other statuses return non-zero.

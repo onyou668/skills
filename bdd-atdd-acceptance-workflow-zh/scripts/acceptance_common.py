@@ -34,6 +34,19 @@ VALID_TYPES = {
     "unit_test",
     "integration_test",
     "http_api",
+    "go_handler_test",
+    "go_router_test",
+    "go_unit_test",
+    "go_integration_test",
+    "local_handler_test",
+    "local_router_test",
+    "local_service_test",
+    "local_function_test",
+    "local_http_client_test",
+    "local_script_test",
+    "cli_acceptance",
+    "async_acceptance",
+    "bdd_runner",
     "command",
     "command_db",
     "command_redis",
@@ -44,6 +57,8 @@ VALID_TYPES = {
     "scheduled_job",
     "manual_review",
 }
+
+RUN_STATUSES = {"pass", "fail", "skip", "pending", "uncertain", "error", "timeout"}
 
 FIELD_ALIASES = {
     "状态": "status",

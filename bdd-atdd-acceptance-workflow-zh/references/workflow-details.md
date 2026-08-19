@@ -103,6 +103,8 @@ Given/When/Then 格式
 
 ## Feature 预览示例
 
+Feature 必须是标准 Gherkin。默认使用英文关键字，步骤文本可中文；执行计划、JSON/YAML、测试函数名和命令不要混入 feature。
+
 ```gherkin
 Feature: 登录模块验收
 
@@ -112,6 +114,96 @@ Feature: 登录模块验收
     Then 登录必须失败
     And 系统必须返回验证码长度错误
 ```
+
+## Execution Plan Preview 示例
+
+执行计划必须来自当前代码只读发现，并且每个 case 都包含 `input / execute / assert`。
+
+```yaml
+version: 1
+unit_id: client-auth-login
+plans:
+  - scenario_id: AC-CLIENT-AUTH-LOGIN-001
+    title: 邮箱登录只允许 Gmail 和 Outlook
+    scope: local
+    remote: false
+    validation_method:
+      type: go_handler_test
+      reason: 当前项目已有 Gin handler、httptest、sqlmock 测试风格；本场景验证本地登录逻辑，不请求远程 HTTP。
+    code_evidence:
+      - path: houduan/server/cmd/server/main.go
+        evidence: POST /api/auth/login -> AuthHandler.Login
+      - path: houduan/server/internal/handlers/auth_handler.go
+        evidence: unifiedLoginReq 包含 loginType/accountType/areaCode/account/password
+      - path: houduan/server/internal/handlers/auth_revocation_test.go
+        evidence: 已有 handlerJSONContext/newHandlerMockDB 测试 helper
+    case_coverage:
+      positive_required: true
+      negative_required: true
+      boundary_required: true
+    cases:
+      - id: invalid_format
+        input:
+          request:
+            content_type: application/json
+            json:
+              loginType: password
+              accountType: email
+              areaCode: "233"
+              account: abc
+              password: valid-password
+        execute:
+          mode: local_handler_call
+          local_code: AuthHandler.Login
+          setup:
+            db: sqlmock
+            external_services: fake_or_none
+        assert:
+          response:
+            http_status: 200
+            json:
+              code: 10001
+              message_id: error.auth.email_invalid
+              data: null
+          side_effects:
+            db_queries: none
+            db_writes: none
+            external_calls: none
+      - id: gmail_continue
+        input:
+          request:
+            content_type: application/json
+            json:
+              loginType: password
+              accountType: email
+              areaCode: "233"
+              account: user@gmail.com
+              password: valid-password
+        execute:
+          mode: local_handler_call
+          local_code: AuthHandler.Login
+          setup:
+            db: sqlmock
+        assert:
+          next_observable:
+            db_query:
+              table: users
+              where:
+                email: user@gmail.com
+          external_calls: none
+    generated_assets_preview:
+      - houduan/server/internal/handlers/auth_email_login_acceptance_test.go
+      - .acceptance/units/client-auth-login/bindings.yaml
+      - .acceptance/units/client-auth-login/compiled/bindings.json
+    command_preview:
+      - go test ./internal/handlers -run TestAcceptanceClientAuthLoginEmailDomain -count=1
+    execution_policy:
+      can_modify_business_code: false
+      run_after_second_confirm: true
+      batch_continue_on_failure: true
+```
+
+如果当前代码没有本地入口，不要伪造脚本或远程请求，标记 `pending` 并说明缺口。
 
 ## 语言候选工具
 
@@ -172,7 +264,7 @@ HTTP test client
 Hurl
 Newman
 Bruno
-curl 包装脚本
+curl 包装脚本（仅用户明确要求远程或本地服务黑盒验收时）
 Shell / PowerShell
 数据库查询
 Redis 查询
@@ -188,13 +280,18 @@ unit_id: login
 
 scenarios:
   AC-LOGIN-001:
-    selected_type: http_api
-    reason: 当前登录模块暴露 POST /api/login，验证码校验发生在真实登录入口，HTTP 验收最接近业务路径
+    selected_type: go_handler_test
+    execution_scope: local
+    remote: false
+    reason: 当前登录模块暴露 POST /api/login，但验收执行入口是本地 handler 测试，不请求远程 HTTP
     alternatives:
-      - go_test_service
+      - go_router_test
+      - go_unit_test
       - godog
-    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength
-    runner: generated/login_acceptance_test.go
+    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength -count=1
+    runner: internal/auth/login_acceptance_test.go
+    plan_doc: generated/ac_login_001_acceptance_plan.md
+    execution_plan: compiled/execution_plan.preview.yaml
     env:
       APP_ENV: test
     assertions:
@@ -246,6 +343,60 @@ eventually:
 
 适用于脚本执行后数据库数字变化、worker 消费队列、定时任务执行、文件生成、日志输出、Redis 状态变化和外部回调模拟。
 
+## 外部 HTTP 调用逻辑
+
+验收外部 HTTP 调用逻辑时，默认验证当前代码的请求构造和响应处理，不请求真实第三方。
+
+```yaml
+external_http:
+  mode: fake_server
+  assert_request:
+    method: POST
+    path: /provider/send
+    headers:
+      Content-Type: application/json
+    json_contains:
+      to: user@example.com
+  fake_response:
+    status: 200
+    json:
+      ok: true
+  assert_local_result:
+    provider_status: submitted
+```
+
+## 脚本和统计报表验收
+
+统计脚本、修复脚本、批处理脚本默认在本地 test/sandbox fixture 中运行。判断 OK 不能只看 exit code，还要断言业务结果。
+
+```yaml
+input:
+  fixtures:
+    db:
+      orders:
+        - id: 1
+          status: paid
+          amount: 100
+  args:
+    - --date
+    - "2026-08-19"
+execute:
+  mode: local_script_or_runner
+  command_preview: go test ./internal/stats -run TestAcceptanceDailyReport -count=1
+assert:
+  process:
+    exit_code: 0
+    stdout_contains:
+      - paid_count=1
+  db_after:
+    daily_reports:
+      - report_date: "2026-08-19"
+        paid_count: 1
+  idempotency:
+    rerun: true
+    invariant: daily_reports for date has exactly one row
+```
+
 ## 报告示例
 
 ```yaml
@@ -258,6 +409,8 @@ summary:
   skip: 0
   pending: 0
   uncertain: 1
+  error: 0
+  timeout: 0
 
 scenarios:
   - id: AC-LOGIN-001
@@ -267,6 +420,7 @@ scenarios:
   - id: AC-LOGIN-002
     status: uncertain
     reason: 验收文件没有说明账号锁定持续时间
+    suggestion: 在 acceptance.md 中补充锁定持续时间和错误码
 ```
 
 ## 内置脚本
@@ -292,11 +446,14 @@ python scripts/acceptance_detect.py --project-root . --pretty
 
 ```text
 项目语言
+子模块路径
 包管理器
 测试框架
 BDD 工具
 config.context 是否存在
 可能的 HTTP 路由
+本地测试风格和 helper 线索
+本地脚本入口
 建议测试命令
 ```
 
@@ -324,10 +481,14 @@ python scripts/acceptance_sync.py --project-root . --unit login --criteria "验�
 python scripts/acceptance_compile.py --project-root . --unit login --confirmed
 ```
 
-用于在用户确认 feature 后生成：
+未带 `--confirmed` 时用于输出 feature + execution_plan_preview，不写入执行资产。
+
+用于在用户确认 feature + execution_plan_preview 后生成：
 
 ```text
 compiled/acceptance.normalized.yaml
+compiled/execution_plan.preview.yaml
+compiled/execution_plan.preview.json
 feature.feature
 bindings.yaml
 compiled/bindings.json
@@ -335,7 +496,7 @@ acceptance.lock.yaml
 generated/*_acceptance_plan.md
 ```
 
-该脚本会根据项目检测结果选择候选验收方式，但不会编造业务断言。
+该脚本会根据项目检测结果选择候选本地验收方式，写入建议的真实验收测试文件路径 `runner` 和计划文档 `plan_doc`。它不会编造业务断言、不会生成远程请求、不会修改业务代码。
 
 ### acceptance_run.py
 
@@ -353,3 +514,5 @@ reports/latest.json
 ```
 
 如果场景缺少命令或状态为 `pending`/`uncertain`，默认不会执行，也不会当作通过。
+
+如果 `runner` 指向的真实验收测试文件还不存在，默认标记为 `pending`，不会执行命令。批量执行时，单个场景失败、报错或超时不会中断后续场景；最终报告会统一统计 `pass/fail/skip/pending/uncertain/error/timeout`。只有整体状态为 `pass` 时返回 0，其他状态返回非 0。

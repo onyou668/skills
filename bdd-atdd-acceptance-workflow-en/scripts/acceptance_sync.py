@@ -141,7 +141,8 @@ def main() -> int:
     if added:
         print("Incremental feature preview:")
         print(render_feature(feature_title or unit_id, added))
-        print("Waiting for user confirmation before generating bindings or validation code.")
+        print("Run acceptance_compile.py without --confirmed to produce feature + execution_plan_preview.")
+        print("Wait for user confirmation before generating bindings or validation code.")
     if skipped:
         print("Similar scenarios already exist; skipped:")
         for scenario in skipped:

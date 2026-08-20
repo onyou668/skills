@@ -205,20 +205,95 @@ def split_case_groups(scenario: Scenario) -> dict:
     has_allowed_email = any(word in raw for word in ["gmail", "google", "谷歌", "outlook"])
     has_positive = has_allowed_email or any(word in raw for word in ["valid", "success", "allow", "合法", "成功", "允许", "正确"])
     has_negative = ("只支持" in raw or "only" in raw) or any(word in raw for word in ["invalid", "fail", "reject", "非法", "失败", "拒绝", "错误"])
+    has_boundary = bool(scenario.data) or any(word in raw for word in ["empty", "blank", "max", "min", "limit", "边界", "为空", "空值", "最大", "最小", "超长", "长度", "临界"])
+    has_side_effect = any(word in raw for word in ["db", "mysql", "redis", "mq", "file", "log", "数据库", "缓存", "队列", "消息", "文件", "日志", "写入", "不生成", "生成"])
+    needs_idempotency = any(word in raw for word in ["重复", "幂等", "idempotent", "rerun", "duplicate"])
+    needs_concurrency = any(word in raw for word in ["并发", "竞态", "concurrent", "race"])
+    needs_async = any(word in raw for word in ["异步", "队列", "mq", "worker", "job", "定时", "async", "queue"])
+    needs_external = any(word in raw for word in ["第三方", "外部", "短信", "邮件", "支付", "推送", "external", "sms", "email", "payment"])
+    needs_rollback = any(word in raw for word in ["回滚", "事务", "rollback", "transaction", "半成功"])
+    expected = {
+        "positive examples": has_positive,
+        "negative examples": has_negative,
+        "boundary examples": has_boundary,
+        "side-effect assertions": has_side_effect,
+    }
+    if needs_idempotency:
+        expected["idempotency expectation"] = "幂等" in scenario.all_text() or "idempotent" in raw
+    if needs_concurrency:
+        expected["concurrency expectation"] = True
+    if needs_async:
+        expected["async eventual assertion"] = any(word in raw for word in ["最终", "eventually", "轮询", "poll"])
+    if needs_external:
+        expected["external dependency failure handling"] = any(word in raw for word in ["失败", "超时", "timeout", "error", "异常"])
+    if needs_rollback:
+        expected["rollback/no-partial-success assertion"] = any(word in raw for word in ["回滚", "rollback", "不产生", "无副作用", "no side effect"])
     return {
         "positive_required": True,
         "negative_required": True,
         "boundary_required": True,
+        "side_effect_required": True,
+        "idempotency_required": needs_idempotency,
+        "concurrency_required": needs_concurrency,
+        "async_required": needs_async,
+        "external_dependency_required": needs_external,
+        "rollback_required": needs_rollback,
         "positive_evidence_present": has_positive,
         "negative_evidence_present": has_negative,
-        "missing_or_uncertain": [
-            item
-            for item, present in {
-                "positive examples": has_positive,
-                "negative examples": has_negative,
-            }.items()
-            if not present
-        ],
+        "boundary_evidence_present": has_boundary,
+        "side_effect_evidence_present": has_side_effect,
+        "missing_or_uncertain": [item for item, present in expected.items() if not present],
+    }
+
+
+def atdd_quality_check(scenario: Scenario, case_groups: dict) -> dict:
+    missing: list[str] = []
+    if not scenario.given:
+        missing.append("Given business context")
+    if not scenario.when:
+        missing.append("When business action or event")
+    if not scenario.then:
+        missing.append("Then observable business result")
+    missing.extend(case_groups.get("missing_or_uncertain", []))
+    return {
+        "invest": {
+            "independent": "review_required",
+            "negotiable": "review_required",
+            "valuable": "review_required",
+            "estimable": "review_required",
+            "small": "review_required",
+            "testable": not missing and scenario.status == "active",
+        },
+        "three_amigos_prompts": {
+            "business": "Confirm business value, success result, and final acceptance owner.",
+            "development": "Confirm local entry point, state, data, dependencies, and safe fixtures.",
+            "testing": "Confirm negative paths, boundaries, side effects, regression risks, and manual demo needs.",
+        },
+        "missing_or_uncertain": missing,
+    }
+
+
+def bdd_quality_check(scenario: Scenario) -> dict:
+    raw = scenario.all_text().lower()
+    how_markers = ["http://", "https://", "button", "按钮 id", "css", "xpath", "sql", "select *", "mock", "helper", "函数", "function"]
+    too_many_steps = len(scenario.given) + len(scenario.when) + len(scenario.then) > 10
+    return {
+        "gherkin_validity": {
+            "has_given": bool(scenario.given),
+            "has_when": bool(scenario.when),
+            "has_then": bool(scenario.then),
+            "one_behavior_preferred": True,
+            "step_count": len(scenario.given) + len(scenario.when) + len(scenario.then),
+        },
+        "declarative_language": {
+            "feature_should_describe_what_not_how": True,
+            "how_markers_detected": [marker for marker in how_markers if marker in raw],
+            "split_recommended": too_many_steps,
+        },
+        "living_documentation": {
+            "keep_feature_business_readable": True,
+            "put_json_sql_commands_and_bindings_in_execution_plan": True,
+        },
     }
 
 
@@ -329,7 +404,7 @@ def request_payload_for_case(scenario: Scenario, route: dict, value: str, kind: 
 
 
 def assertion_for_case(scenario: Scenario, kind: str) -> dict:
-    negative = kind in {"negative", "boundary_invalid"}
+    negative = kind in {"negative", "boundary_invalid", "external_failure"}
     return {
         "expected_behavior": scenario.then,
         "response_or_output": {
@@ -350,7 +425,61 @@ def assertion_for_case(scenario: Scenario, kind: str) -> dict:
     }
 
 
-def build_execution_cases(scenario: Scenario, binding: dict, detection: dict) -> list[dict]:
+def dependency_resolution_for_case(scenario: Scenario, kind: str, context_present: bool) -> dict:
+    raw = scenario.all_text().lower()
+    early_failure = kind in {"negative", "boundary_invalid"} or any(word in raw for word in ["非法", "无效", "invalid", "reject", "拒绝", "错误"])
+    needs_state = any(word in raw for word in ["db", "mysql", "redis", "mq", "数据库", "缓存", "队列", "消息", "写入", "状态", "流水", "余额"])
+    external = any(word in raw for word in ["第三方", "外部", "短信", "邮件", "支付", "推送", "external", "sms", "email", "payment"])
+    base = {
+        "mysql": {
+            "required_by_assertion": needs_state and "mysql" in raw or "数据库" in raw or "db" in raw,
+            "context_config_found": context_present,
+            "selected_mode": "no_access_mock" if early_failure else "real_test_if_safe_else_fake_or_pending",
+            "reason": "Early validation failures must prove downstream persistence is not accessed." if early_failure else "Use real local/test/sandbox state only when the assertion requires final persisted state and safe config exists.",
+        },
+        "redis": {
+            "required_by_assertion": needs_state and ("redis" in raw or "缓存" in raw),
+            "context_config_found": context_present,
+            "selected_mode": "no_access_mock" if early_failure else "fake_or_real_test_if_safe",
+            "reason": "Use no-access fake for early rejection; otherwise use a safe fake/test instance when cache state is observable.",
+        },
+        "mq": {
+            "required_by_assertion": needs_state and ("mq" in raw or "队列" in raw or "消息" in raw),
+            "context_config_found": context_present,
+            "selected_mode": "fake_queue_or_local_consumer",
+            "reason": "Do not call remote MQ by default; trigger local producer/consumer logic and assert messages or final state.",
+        },
+        "external_http": {
+            "required_by_assertion": external,
+            "context_config_found": context_present,
+            "selected_mode": "fake_server_or_mock_transport",
+            "reason": "External services, SMS, email, payment, and push are faked by default; real calls require separate confirmation.",
+        },
+    }
+    return base
+
+
+def mock_contract_for_case(scenario: Scenario, kind: str) -> dict:
+    return {
+        "required_when_using_mock_fake_or_stub": True,
+        "rules": [
+            "Mock/fake/stub may replace only dependencies, never the business code entry point under acceptance.",
+            "Response fields, types, error shape, status, headers, and serialization must come from current-code contracts.",
+            "Mark the case uncertain or pending if the dependency contract cannot be confirmed from code evidence.",
+        ],
+        "expected_contract_sources": [
+            "DTO/struct/schema/interface",
+            "OpenAPI/proto/GraphQL schema",
+            "database model or scan fields",
+            "existing fixtures",
+            "fields actually read by the current caller",
+        ],
+        "status": "must_refine_from_current_code",
+        "case_kind": kind,
+    }
+
+
+def build_execution_cases(scenario: Scenario, binding: dict, detection: dict, context_present: bool) -> list[dict]:
     route = route_hint_for_scenario(scenario, detection)
     entries = parse_data_entries(scenario)
     examples = derive_email_examples(scenario, entries) if any(word in scenario.all_text().lower() for word in ["email", "邮箱", "mail"]) else derive_generic_examples(scenario, entries)
@@ -359,6 +488,13 @@ def build_execution_cases(scenario: Scenario, binding: dict, detection: dict) ->
         raw_cases.append((f"positive_{idx}", "positive", value))
     for idx, value in enumerate(examples["invalid"][:5], 1):
         raw_cases.append((f"negative_{idx}", "negative", value))
+    for idx, value in enumerate(list_from_entries(entries, ["boundary", "boundary_values", "min_values", "max_values"])[:5], 1):
+        raw_cases.append((f"boundary_{idx}", "boundary", value))
+    case_groups = split_case_groups(scenario)
+    if not raw_cases and case_groups.get("negative_evidence_present"):
+        raw_cases.append(("negative_1", "negative", "pending_from_acceptance"))
+    if not raw_cases and case_groups.get("positive_evidence_present"):
+        raw_cases.append(("positive_1", "positive", "pending_from_acceptance"))
     if not raw_cases:
         raw_cases.append(("case_001", "uncertain", ""))
 
@@ -395,6 +531,8 @@ def build_execution_cases(scenario: Scenario, binding: dict, detection: dict) ->
                     "continue_batch_on_failure": True,
                 },
                 "assert": assertion_for_case(scenario, kind),
+                "dependency_resolution": dependency_resolution_for_case(scenario, kind, context_present),
+                "mock_contract": mock_contract_for_case(scenario, kind),
             }
         )
     return cases
@@ -406,6 +544,8 @@ def build_execution_plan(unit_id: str, feature_title: str, scenarios: list[Scena
     for scenario in scenarios:
         binding = binding_map[scenario.id]
         case_groups = split_case_groups(scenario)
+        atdd_quality = atdd_quality_check(scenario, case_groups)
+        bdd_quality = bdd_quality_check(scenario)
         plans.append(
             {
                 "scenario_id": scenario.id,
@@ -418,6 +558,10 @@ def build_execution_plan(unit_id: str, feature_title: str, scenarios: list[Scena
                     "reason": binding["reason"],
                 },
                 "case_coverage": case_groups,
+                "atdd_quality_check": atdd_quality,
+                "bdd_quality_check": bdd_quality,
+                "missing_acceptance_questions": atdd_quality["missing_or_uncertain"],
+                "manual_acceptance_required": scenario.status == "manual",
                 "code_evidence": {
                     "codegraph_available": detection.get("codegraph_available", False),
                     "languages": detection.get("languages", []),
@@ -426,7 +570,7 @@ def build_execution_plan(unit_id: str, feature_title: str, scenarios: list[Scena
                     "local_test_styles": detection.get("local_test_styles", {}),
                     "local_scripts": detection.get("local_scripts", [])[:20],
                 },
-                "cases": build_execution_cases(scenario, binding, detection),
+                "cases": build_execution_cases(scenario, binding, detection, context_present),
                 "generated_assets_preview": [
                     binding["runner"],
                     binding["plan_doc"],

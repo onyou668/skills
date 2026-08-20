@@ -72,6 +72,32 @@ Notes:
 - 错误码待确认
 ```
 
+## 口头新增验收条件示例
+
+用户可以说：
+
+```text
+给登录模块新增一个验收条件：
+用户输入错误密码时，登录失败，返回密码错误提示，并且不生成 token。
+```
+
+Skill 应先同步到 `acceptance.md`，然后输出 feature 预览和 `execution_plan_preview`。如果口头条件缺少关键期望，例如：
+
+```text
+连续多次错误密码后锁定账号
+```
+
+则必须标记为 `uncertain` 或 `pending`，并列出待确认问题：
+
+```text
+- 错误次数阈值是多少？
+- 锁定时长是多少？
+- 返回的业务 code / message_id 是什么？
+- 已锁定期间再次登录应该返回什么？
+```
+
+不要为这些值编造默认答案。
+
 ## 验收文件校验与修正
 
 可以自动修正：
@@ -115,6 +141,38 @@ Feature: 登录模块验收
     And 系统必须返回验证码长度错误
 ```
 
+### Gherkin 质量规则
+
+```text
+Feature 只写业务语义。
+Scenario 名称描述业务行为。
+Given 写业务前置状态。
+When 写用户动作或业务事件。
+Then 写可观察业务结果。
+步骤描述 WHAT，不描述 HOW。
+URL、JSON、SQL、函数名、mock、runner、命令必须放到 execution_plan_preview。
+pending / uncertain 应使用 tag 或 execution_plan_preview 表示，不能写成业务步骤。
+```
+
+不推荐：
+
+```gherkin
+Scenario: AC-LOGIN-001 错误密码
+  Given POST /api/login
+  When body.account="user@example.com" and body.password="bad"
+  Then AuthHandler.Login returns code 10001
+```
+
+推荐：
+
+```gherkin
+Scenario: AC-LOGIN-001 错误密码不能登录
+  Given 用户账号存在且可以登录
+  When 用户使用错误密码登录
+  Then 登录必须失败
+  And 系统不得生成登录 token
+```
+
 ## Execution Plan Preview 示例
 
 执行计划必须来自当前代码只读发现，并且每个 case 都包含 `input / execute / assert`。
@@ -141,8 +199,38 @@ plans:
       positive_required: true
       negative_required: true
       boundary_required: true
+      side_effect_required: true
+    atdd_quality_check:
+      invest:
+        testable: true
+      three_amigos_prompts:
+        business: 确认业务价值、成功结果和最终验收人
+        development: 确认本地入口、状态、数据、依赖和 fixture
+        testing: 确认失败路径、边界、副作用和回归风险
+    bdd_quality_check:
+      gherkin_validity:
+        has_given: true
+        has_when: true
+        has_then: true
+      declarative_language:
+        feature_should_describe_what_not_how: true
     cases:
       - id: invalid_format
+        dependency_resolution:
+          mysql:
+            required_by_assertion: false
+            context_config_found: may_exist
+            selected_mode: no_access_mock
+            reason: 本 case 验证早期拦截，后续用户查询和登录状态写入不应发生。
+          external_http:
+            required_by_assertion: false
+            selected_mode: fake_server_or_mock_transport
+            reason: 默认不调用真实第三方。
+        mock_contract:
+          required_when_using_mock_fake_or_stub: true
+          expected_contract_sources:
+            - DTO/struct/schema/interface
+            - 当前调用方实际读取的字段
         input:
           request:
             content_type: application/json
@@ -170,6 +258,12 @@ plans:
             db_writes: none
             external_calls: none
       - id: gmail_continue
+        dependency_resolution:
+          mysql:
+            required_by_assertion: true
+            context_config_found: check_context_or_project_test_config
+            selected_mode: real_test_if_safe_else_fake_or_pending
+            reason: 本 case 如需证明用户状态或 token 写入，必须使用安全的 local/test/sandbox 依赖或标记 pending。
         input:
           request:
             content_type: application/json
@@ -403,6 +497,7 @@ assert:
 unit_id: login
 run_id: 2026-08-19T10-30-00
 status: fail
+acceptance_state: not_accepted
 summary:
   pass: 3
   fail: 1
@@ -415,12 +510,22 @@ summary:
 scenarios:
   - id: AC-LOGIN-001
     status: pass
+    acceptance_state: automated_pass
     command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength
 
   - id: AC-LOGIN-002
     status: uncertain
+    acceptance_state: not_accepted
     reason: 验收文件没有说明账号锁定持续时间
     suggestion: 在 acceptance.md 中补充锁定持续时间和错误码
+```
+
+`acceptance_state` 表达业务验收语义：
+
+```text
+automated_pass   自动化验收通过，但不等于 PO 已签核
+manual_required  需要人工 Demo / PO 或业务确认
+not_accepted     未通过、未执行或仍有 pending/uncertain
 ```
 
 ## 内置脚本

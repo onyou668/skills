@@ -28,6 +28,16 @@ NO_TEST_PATTERNS = [
 ]
 
 
+def acceptance_state_for(result: dict) -> str:
+    if result.get("status") == "pass":
+        return "automated_pass"
+    if result.get("status") == "pending" and "manual" in str(result.get("reason", "")).lower():
+        return "manual_required"
+    if result.get("selected_type") == "manual_review":
+        return "manual_required"
+    return "not_accepted"
+
+
 def write_report_yaml(path: Path, report: dict) -> None:
     lines = [
         f"unit_id: {report['unit_id']}",
@@ -46,6 +56,7 @@ def write_report_yaml(path: Path, report: dict) -> None:
                 f"    command: {scenario.get('command', '')!r}",
                 f"    runner: {scenario.get('runner', '')!r}",
                 f"    reason: {scenario.get('reason', '')!r}",
+                f"    acceptance_state: {scenario.get('acceptance_state', 'not_accepted')}",
             ]
         )
         if "exit_code" in scenario:
@@ -140,6 +151,7 @@ def main() -> int:
             else:
                 result["status"] = "fail"
                 summary["fail"] += 1
+        result["acceptance_state"] = acceptance_state_for(result)
         results.append(result)
 
     overall = (
@@ -157,6 +169,7 @@ def main() -> int:
         "unit_id": unit_id,
         "run_id": now_id(),
         "status": overall,
+        "acceptance_state": "automated_pass" if overall == "pass" else "not_accepted",
         "context_present": bool(context.get("context")),
         "summary": summary,
         "scenarios": results,

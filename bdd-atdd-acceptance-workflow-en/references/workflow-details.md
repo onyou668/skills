@@ -72,6 +72,32 @@ Notes:
 - Error code needs confirmation
 ```
 
+## Spoken Acceptance Criterion Example
+
+The user may say:
+
+```text
+Add an acceptance criterion to the login module:
+When the user enters a wrong password, login fails, a password-error message is returned, and no token is generated.
+```
+
+The skill must sync this into `acceptance.md` first, then show the feature preview and `execution_plan_preview`. If the spoken criterion lacks key expectations, for example:
+
+```text
+Lock the account after several wrong passwords.
+```
+
+mark it `uncertain` or `pending` and list questions:
+
+```text
+- What is the failed-attempt threshold?
+- How long is the account locked?
+- What business code / message_id is returned?
+- What should happen during login attempts while locked?
+```
+
+Do not invent default values for these fields.
+
 ## Validation And Normalization
 
 May safely normalize:
@@ -115,6 +141,38 @@ Feature: Login module acceptance
     And the system must return a verification-code length error
 ```
 
+### Gherkin Quality Rules
+
+```text
+Feature contains only business semantics.
+Scenario names describe business behavior.
+Given describes prerequisite business state.
+When describes a user action or business event.
+Then describes observable business results.
+Steps describe WHAT, not HOW.
+URLs, JSON, SQL, function names, mocks, runners, and commands belong in execution_plan_preview.
+pending / uncertain should be represented with tags or execution_plan_preview, not as business steps.
+```
+
+Not recommended:
+
+```gherkin
+Scenario: AC-LOGIN-001 Wrong password
+  Given POST /api/login
+  When body.account="user@example.com" and body.password="bad"
+  Then AuthHandler.Login returns code 10001
+```
+
+Recommended:
+
+```gherkin
+Scenario: AC-LOGIN-001 Wrong password cannot log in
+  Given the user account exists and can log in
+  When the user logs in with a wrong password
+  Then login must fail
+  And the system must not generate a login token
+```
+
 ## Execution Plan Preview Example
 
 The execution plan must come from read-only discovery of current code, and every case must contain `input / execute / assert`.
@@ -141,8 +199,38 @@ plans:
       positive_required: true
       negative_required: true
       boundary_required: true
+      side_effect_required: true
+    atdd_quality_check:
+      invest:
+        testable: true
+      three_amigos_prompts:
+        business: Confirm business value, success result, and final acceptance owner
+        development: Confirm local entry point, state, data, dependencies, and fixtures
+        testing: Confirm failure paths, boundaries, side effects, and regression risks
+    bdd_quality_check:
+      gherkin_validity:
+        has_given: true
+        has_when: true
+        has_then: true
+      declarative_language:
+        feature_should_describe_what_not_how: true
     cases:
       - id: invalid_format
+        dependency_resolution:
+          mysql:
+            required_by_assertion: false
+            context_config_found: may_exist
+            selected_mode: no_access_mock
+            reason: This case validates early rejection, so later user queries and login-state writes must not happen.
+          external_http:
+            required_by_assertion: false
+            selected_mode: fake_server_or_mock_transport
+            reason: Real third parties are not called by default.
+        mock_contract:
+          required_when_using_mock_fake_or_stub: true
+          expected_contract_sources:
+            - DTO/struct/schema/interface
+            - fields actually read by the current caller
         input:
           request:
             content_type: application/json
@@ -170,6 +258,12 @@ plans:
             db_writes: none
             external_calls: none
       - id: gmail_continue
+        dependency_resolution:
+          mysql:
+            required_by_assertion: true
+            context_config_found: check_context_or_project_test_config
+            selected_mode: real_test_if_safe_else_fake_or_pending
+            reason: If this case must prove user state or token writes, use safe local/test/sandbox dependencies or mark pending.
         input:
           request:
             content_type: application/json
@@ -403,6 +497,7 @@ assert:
 unit_id: login
 run_id: 2026-08-19T10-30-00
 status: fail
+acceptance_state: not_accepted
 summary:
   pass: 3
   fail: 1
@@ -415,12 +510,22 @@ summary:
 scenarios:
   - id: AC-LOGIN-001
     status: pass
+    acceptance_state: automated_pass
     command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength
 
   - id: AC-LOGIN-002
     status: uncertain
+    acceptance_state: not_accepted
     reason: acceptance.md does not define the account lock duration
     suggestion: Add lock duration and error code to acceptance.md
+```
+
+`acceptance_state` expresses business acceptance semantics:
+
+```text
+automated_pass   automated acceptance passed, but PO sign-off is not implied
+manual_required  manual Demo / PO or business confirmation is still required
+not_accepted     failed, not executed, or still pending/uncertain
 ```
 
 ## Bundled Scripts

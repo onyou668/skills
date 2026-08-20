@@ -46,6 +46,15 @@ scripts/acceptance_run.py
 必须等待用户明确确认执行后再运行验收命令。
 必须根据当前代码实际本地入口选择验收方式。
 必须记录验收方式选择原因。
+必须按新增验收条件、开发完成验收、补边界条件三类用户意图选择流程。
+必须对每个 active 场景执行 ATDD 质量检查：INVEST、Three Amigos 视角、可测试性和缺失业务期望。
+必须对每个 feature 场景执行 BDD/Gherkin 质量检查：业务语义、声明式语言、Given/When/Then 完整性和步骤数量。
+必须按 case 解析依赖模式，不能按整个 unit 一刀切。
+必须在 execution_plan_preview 中输出 dependency_resolution。
+必须说明 MySQL、Redis、Kafka、MQ、文件、外部 HTTP 等依赖为什么选择 real_test、mock、fake、no_access_mock、none 或 pending。
+必须在验收断言依赖真实中间件状态且 context 或项目 test config 提供明确 local/test/sandbox 配置时，优先使用真实测试中间件。
+必须在验收目标是早期拦截、参数校验失败或无副作用时，使用 no-access mock/fake 证明后续依赖未被访问，即使 context 存在真实中间件配置。
+必须在使用 mock/fake/stub 返回数据时输出 mock_contract，并说明响应字段、类型、错误结构和状态码来自当前代码的哪个契约证据。
 必须优先复用项目已有测试体系和执行入口。
 必须只更新受影响的 unit 和 scenario。
 必须只覆盖 generated block，不覆盖人工代码。
@@ -73,6 +82,11 @@ scripts/acceptance_run.py
 禁止把 HTTP 业务入口误判为远程 HTTP 验收。
 禁止默认请求远程 HTTP 服务。
 禁止默认连接远程数据库、Redis、MQ、对象存储或外部 API。
+禁止因为 context 存在中间件配置就让所有 case 都使用真实中间件。
+禁止在需要验证真实中间件最终状态时，仅用普通 mock 伪造通过。
+禁止使用缺少当前代码契约来源的 mock/fake 响应。
+禁止 mock 当前被验收的业务代码入口；mock/fake/stub 只能替代依赖或中间件。
+禁止省略 dependency_resolution 或 mock_contract 的关键选择理由。
 禁止默认调用真实第三方服务、真实短信、真实邮件、真实支付。
 禁止凭空创造当前仓库不存在的脚本、runner、service、helper、CLI 参数或测试入口。
 禁止为了让验收通过而修改 handler、service、model、repository、配置加载、业务规则等生产代码。
@@ -115,6 +129,60 @@ acceptance.md 验收文件
 ```
 
 第一次确认前，允许只读代码发现，禁止生成执行层。第一次确认后，只能生成验收资产，禁止修改业务代码。第二次确认后，才执行验收命令。
+
+## 支持的用户意图
+
+### 新增验收条件
+
+当用户说“给登录模块新增一个验收条件：xxxxx”“再加一个边界条件：xxxxx”或类似请求时：
+
+```text
+1. 定位或创建对应 unit。
+2. 读取已有 acceptance.md。
+3. 检查是否已有相同或相近场景。
+4. 将口头条件同步为 acceptance.md 场景。
+5. 尽量拆分 Given / When / Then。
+6. 如果缺少错误码、次数、金额、时间窗口、状态值或可观察结果，标记为 uncertain 或 pending。
+7. 输出本次新增 feature 预览。
+8. 只读扫描代码并输出 execution_plan_preview。
+9. 等待用户确认后，才生成验证资产。
+```
+
+口头新增可以作为验收输入，但不能绕过 `acceptance.md` 直接生成测试代码。
+
+### 开发完成后验收
+
+当用户说“开发完了，需要验收”“按当前代码生成验证”“跑验收”时：
+
+```text
+1. 读取 acceptance.md。
+2. 若 acceptance.md 不存在，先要求从 spec、issue、PRD 或用户口头条件同步生成。
+3. 只读扫描当前代码，识别 business_entrypoint 和 validation_entrypoint。
+4. 输出 feature 预览和 execution_plan_preview。
+5. 用户确认后只生成验收资产。
+6. 再次询问是否执行验收。
+7. 执行后生成报告，只报告差异和建议，不自动修改业务代码。
+```
+
+### 补充边界条件
+
+当用户要求补边界时，必须主动检查：
+
+```text
+positive：正常成功路径
+negative：非法输入、权限不足、状态不允许、资源不存在
+boundary：空值、最小值、最大值、超长、临界时间、重复提交
+side-effect：DB / Redis / MQ / 文件 / 外部调用是否产生或不产生副作用
+idempotency：重复请求、重复执行脚本、重复消费消息结果是否正确
+concurrency：并发请求、竞态、重复扣款、重复发奖、重复创建
+permission：未登录、普通用户、管理员、资源所有者、非资源所有者
+state-transition：合法和非法状态流转
+async：异步任务最终状态、超时、重试、幂等消费
+external-dependency：第三方超时、失败、异常响应、部分成功
+rollback：失败时是否回滚事务或避免半成功状态
+```
+
+可以建议补充边界，但不能编造业务期望。缺少关键信息时标记为 `uncertain` 或 `pending`。
 
 ## 默认目录
 
@@ -198,6 +266,29 @@ manual      只能人工验收
 
 类型默认使用 `auto`。`auto` 表示不要固定生成 HTTP、单元测试或 BDD step，必须读取当前代码后选择最合适的验收方式。
 
+## ATDD 质量检查
+
+每个 active 场景必须检查 INVEST：
+
+```text
+Independent：是否能独立验收。
+Negotiable：是否保留业务讨论空间。
+Valuable：是否能说明用户或业务价值。
+Estimable：是否足够清楚，可估算。
+Small：是否能在较小范围内验收。
+Testable：是否有明确可观察结果和验收条件。
+```
+
+不满足 Testable 的场景必须标记为 `uncertain` 或 `pending`。
+
+每个场景必须从 Three Amigos 视角检查：
+
+```text
+业务视角：业务价值、成功结果、最终验收人。
+开发视角：入口、状态、数据、依赖、fixture。
+测试视角：失败路径、边界、副作用、回归风险、是否需要人工 Demo。
+```
+
 ## 同步规则
 
 从 spec 同步验收条件时：
@@ -243,6 +334,23 @@ Examples 表头必须覆盖所有 <变量>
 ```
 
 feature 只表达业务验收语义和用户可理解的业务触发方式。详细 JSON 参数、响应结构、DB/Redis/MQ/文件断言、测试函数名和命令预览必须放入 `execution_plan_preview`。
+
+BDD/Gherkin 质量规则：
+
+```text
+Feature 只表达业务语义，不写 JSON、SQL、函数名、mock、命令。
+Scenario 名称必须描述业务行为。
+Given 描述前置业务状态。
+When 描述用户动作或业务事件。
+Then 描述可观察业务结果。
+步骤必须声明式，描述 WHAT，不描述 HOW。
+禁止把按钮 id、URL path、数据库字段、测试 helper 名称写进 feature。
+每个 Scenario 只验证一个核心行为。
+每个 Scenario 应独立可读。
+超过 10 步时应拆分或提炼 Background。
+有多组输入时优先使用 Scenario Outline + Examples。
+pending 或 uncertain 用 tag 或 execution_plan_preview 表达，不要写成业务步骤。
+```
 
 只输出本次变化的 Scenario，除非用户要求全量输出。
 
@@ -298,6 +406,12 @@ case_coverage：positive / negative / boundary / side-effect 覆盖
 cases[].input：JSON、参数、fixture、env、消息体
 cases[].execute：本地调用方式、mock/fake、命令预览、超时
 cases[].assert：响应、输出、副作用和无副作用断言
+atdd_quality_check：INVEST、Three Amigos、可测试性、缺失期望
+bdd_quality_check：Gherkin 完整性、声明式语言、活文档风险
+missing_acceptance_questions：需要用户补充的问题
+manual_acceptance_required：是否需要人工 Demo / PO 确认
+dependency_resolution：按 case 说明依赖选择
+mock_contract：使用 mock/fake/stub 时的契约来源和字段要求
 generated_assets_preview：确认后将生成或更新哪些验收资产
 command_preview：确认生成后建议执行的本地命令
 execution_policy：禁止修改业务代码、二次确认后执行、批量不中断

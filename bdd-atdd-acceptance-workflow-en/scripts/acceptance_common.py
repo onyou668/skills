@@ -418,12 +418,12 @@ def render_feature(feature_title: str, scenarios: list[Scenario]) -> str:
     for scenario in scenarios:
         if scenario.status not in {"active", "pending", "uncertain"}:
             continue
+        if scenario.status in {"pending", "uncertain"}:
+            lines.append(f"  @{scenario.status}")
         lines.append(f"  Scenario: {scenario.id} {scenario.title}")
         add_gwt_lines(lines, "Given", scenario.given)
         add_gwt_lines(lines, "When", scenario.when)
         add_gwt_lines(lines, "Then", scenario.then)
-        if scenario.status in {"pending", "uncertain"}:
-            lines.append(f"    And acceptance status is {scenario.status}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

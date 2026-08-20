@@ -46,6 +46,15 @@ After generating acceptance assets, ask whether to continue and run acceptance.
 Wait for explicit execution confirmation before running acceptance commands.
 Choose the validation method from real local code entry points.
 Record why the validation method was selected.
+Choose the flow from the user's intent: add an acceptance criterion, validate completed development, or add boundary conditions.
+Run ATDD quality checks for every active scenario: INVEST, Three Amigos perspectives, testability, and missing business expectations.
+Run BDD/Gherkin quality checks for every feature scenario: business semantics, declarative wording, Given/When/Then completeness, and step count.
+Resolve dependency mode per case, not once for the whole unit.
+Include dependency_resolution in execution_plan_preview.
+Explain why MySQL, Redis, Kafka, MQ, files, external HTTP, and similar dependencies use real_test, mock, fake, no_access_mock, none, or pending.
+Prefer real test middleware when an assertion depends on final middleware state and context or project test config provides explicit local/test/sandbox configuration.
+Use no-access mocks/fakes for early rejection, parameter validation failure, or no-side-effect assertions, even when context has real middleware config.
+Include mock_contract whenever mock/fake/stub data is used, with response fields, types, error shape, and status codes traced to current-code contract evidence.
 Prefer existing project test frameworks and execution entry points.
 Update only affected units and scenarios.
 Overwrite only generated blocks, never manual code.
@@ -73,6 +82,11 @@ Never assume every scenario is a unit test.
 Never treat an HTTP business entry point as remote HTTP acceptance by default.
 Never request remote HTTP services by default.
 Never connect to remote databases, Redis, MQ, object storage, or external APIs by default.
+Never use real middleware for all cases only because context has middleware config.
+Never fake a pass with ordinary mocks when the acceptance assertion requires final real middleware state.
+Never use mock/fake responses without current-code contract evidence.
+Never mock the business code entry point under acceptance; mocks/fakes/stubs may replace only dependencies or middleware.
+Never omit the key reasons for dependency_resolution or mock_contract.
 Never call real third-party services, real SMS, real email, or real payments by default.
 Never invent scripts, runners, services, helpers, CLI arguments, or test entry points that do not exist in the current repository.
 Never modify handlers, services, models, repositories, configuration loading, or business rules to make acceptance pass.
@@ -115,6 +129,60 @@ write report, failure reasons, evidence, and suggestions
 ```
 
 Before the first confirmation, read code only for discovery and previews; do not generate execution assets. After the first confirmation, generate only acceptance assets and never production code. After the second confirmation, run acceptance commands.
+
+## Supported User Intents
+
+### Add Acceptance Criteria
+
+When the user says "add an acceptance criterion to the login module: xxxxx", "add a boundary condition: xxxxx", or similar:
+
+```text
+1. Locate or create the matching unit.
+2. Read the existing acceptance.md.
+3. Check for the same or a similar scenario.
+4. Sync the spoken criterion into acceptance.md as a scenario.
+5. Split it into Given / When / Then when possible.
+6. If error codes, counts, amounts, time windows, state values, or observable results are missing, mark it uncertain or pending.
+7. Show the incremental feature preview.
+8. Perform read-only code discovery and show execution_plan_preview.
+9. Wait for user confirmation before generating validation assets.
+```
+
+Spoken additions may be acceptance input, but they must not bypass `acceptance.md` and go directly to test code.
+
+### Validate Completed Development
+
+When the user says "development is done, validate it", "generate validation from current code", or "run acceptance":
+
+```text
+1. Read acceptance.md.
+2. If acceptance.md does not exist, first sync it from a spec, issue, PRD, or spoken criteria.
+3. Perform read-only current-code discovery and identify business_entrypoint and validation_entrypoint.
+4. Show the feature preview and execution_plan_preview.
+5. After confirmation, generate only acceptance assets.
+6. Ask again before running acceptance.
+7. After execution, write the report and only report differences and suggestions; do not modify business code automatically.
+```
+
+### Add Boundary Conditions
+
+When the user asks for boundary coverage, check:
+
+```text
+positive: normal success path
+negative: invalid input, missing permission, disallowed state, missing resource
+boundary: empty, min, max, too long, critical time, repeated submission
+side-effect: whether DB / Redis / MQ / files / external calls are or are not produced
+idempotency: repeated request, repeated script run, repeated message consumption
+concurrency: concurrent requests, races, duplicate charge, duplicate reward, duplicate creation
+permission: anonymous, normal user, admin, resource owner, non-owner
+state-transition: valid and invalid state transitions
+async: eventual state, timeout, retry, idempotent consumption
+external-dependency: third-party timeout, failure, malformed response, partial success
+rollback: rollback or no partial-success state on failure
+```
+
+The agent may suggest missing boundaries, but it must not invent business expectations. Missing key details must become `uncertain` or `pending`.
 
 ## Default Directory
 
@@ -198,6 +266,29 @@ manual      manual acceptance only
 
 Use `auto` as the default type. `auto` means the agent must inspect current code and choose the best validation method. Do not assume HTTP, unit tests, or BDD steps.
 
+## ATDD Quality Check
+
+Every active scenario must be checked against INVEST:
+
+```text
+Independent: can it be accepted independently?
+Negotiable: does it preserve room for business discussion?
+Valuable: does it state user or business value?
+Estimable: is it clear enough to estimate?
+Small: can it be accepted in a small scope?
+Testable: does it have observable results and explicit acceptance criteria?
+```
+
+Scenarios that fail Testable must be marked `uncertain` or `pending`.
+
+Every scenario must also be checked from Three Amigos perspectives:
+
+```text
+Business: business value, success result, final acceptance owner.
+Development: entry point, state, data, dependencies, fixtures.
+Testing: failure paths, boundaries, side effects, regression risks, manual Demo need.
+```
+
 ## Sync Rules
 
 When syncing acceptance criteria from a spec:
@@ -243,6 +334,23 @@ Never mix YAML, JSON, Markdown headings, bindings, test function names, or execu
 ```
 
 Feature files express business acceptance semantics and user-visible business triggers. Detailed JSON parameters, response shape, DB/Redis/MQ/file assertions, test function names, and command previews belong in `execution_plan_preview`.
+
+BDD/Gherkin quality rules:
+
+```text
+Feature expresses only business semantics, not JSON, SQL, function names, mocks, or commands.
+Scenario names describe business behavior.
+Given describes prerequisite business state.
+When describes a user action or business event.
+Then describes observable business results.
+Steps must be declarative and describe WHAT, not HOW.
+Do not put button ids, URL paths, database fields, or test helper names in feature files.
+Each Scenario verifies one core behavior.
+Each Scenario should be independently readable.
+Split or extract Background when a scenario exceeds 10 steps.
+Prefer Scenario Outline + Examples for multiple input rows.
+Represent pending or uncertain with tags or execution_plan_preview, not as business steps.
+```
 
 Show only changed scenarios unless the user asks for the full feature.
 
@@ -298,6 +406,12 @@ case_coverage: positive / negative / boundary / side-effect coverage
 cases[].input: JSON, args, fixtures, env, message body
 cases[].execute: local call method, mocks/fakes, command preview, timeout
 cases[].assert: response, output, side effects, and absence-of-side-effect assertions
+atdd_quality_check: INVEST, Three Amigos, testability, missing expectations
+bdd_quality_check: Gherkin completeness, declarative wording, living-documentation risk
+missing_acceptance_questions: questions the user must answer
+manual_acceptance_required: whether manual Demo / PO confirmation is needed
+dependency_resolution: per-case dependency choice
+mock_contract: contract sources and required fields when using mock/fake/stub
 generated_assets_preview: acceptance assets to generate or update after confirmation
 command_preview: local commands suggested after generation
 execution_policy: no business-code edits, run only after second confirmation, continue batch on failure

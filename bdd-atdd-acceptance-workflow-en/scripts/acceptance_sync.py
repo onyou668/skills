@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize acceptance units and sync criteria into acceptance.md.
-
-This script stops at the feature-preview gate. It never generates bindings,
-test code, or execution commands.
-"""
+"""Collect document, spoken, or manual criteria in the acceptance.md intake."""
 
 from __future__ import annotations
 
@@ -220,10 +216,10 @@ def main() -> int:
             append_scenario(path, candidate, locale)
 
     if added:
-        print("Incremental feature preview:")
+        print("Proposed incremental Feature preview:")
         print(render_feature(feature_title or unit_id, added))
-        print("Run acceptance_compile.py without --confirmed to produce feature + execution_plan_preview.")
-        print("Wait for user confirmation before generating bindings or validation code.")
+        print("acceptance.md is an intake, not the canonical acceptance contract.")
+        print("Run acceptance_compile.py to inspect the generation preview. In manual mode, wait for confirmation before updating the canonical Feature.")
     if skipped:
         print("Similar scenarios already exist; skipped:")
         for scenario in skipped:

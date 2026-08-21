@@ -1,757 +1,316 @@
 #!/usr/bin/env python3
-"""Compile confirmed acceptance.md into feature, bindings, lock, and scaffolds."""
+"""Confirm an acceptance intake as the canonical Feature and initialize its module map."""
 
 from __future__ import annotations
 
 import argparse
-import ast
+import hashlib
 import json
 import re
 from pathlib import Path
 
 from acceptance_common import (
     Scenario,
+    acceptance_map_path,
+    context_dependency_mode,
     default_locale_from_script,
-    dump_json,
+    feature_path,
+    load_yaml,
     parse_acceptance_md,
     read_config_context,
     render_feature,
-    scalar,
     slugify,
     unit_dir,
-    write_normalized_yaml,
     write_text,
+    write_yaml,
 )
 from acceptance_detect import detect
+from acceptance_feature import parse_feature
 
 
-def scenario_test_name(scenario: Scenario) -> str:
-    words = re.findall(r"[A-Za-z0-9]+", scenario.id.title())
-    return "TestAcceptance" + "".join(words or ["Scenario"])
+DEPENDENCY_TERMS = {
+    "mysql": ["mysql"],
+    "postgres": ["postgres", "postgresql"],
+    "database": ["database", "db", "数据库", "表", "事务"],
+    "redis": ["redis", "缓存"],
+    "kafka": ["kafka"],
+    "mq": ["rabbitmq", " mq", "消息队列", "队列"],
+    "object_storage": ["s3", "object storage", "对象存储"],
+    "external_http": ["external http", "third-party", "第三方", "外部接口"],
+}
 
 
-def go_module_prefix(detection: dict) -> str:
-    module = detection.get("modules", {}).get("go", "")
-    return module.replace("\\", "/").strip("./")
+def hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
-def go_package_for_selected(selected: str, detection: dict) -> str:
-    module = go_module_prefix(detection)
-    style_files: list[str] = []
-    for style_name in ["go_gin_handler", "go_httptest", "go_sqlmock"]:
-        style_files.extend(item.get("file", "") for item in detection.get("local_test_styles", {}).get(style_name, []))
-    route_files = [item.get("file", "") for item in detection.get("route_hints", [])]
-    handler_files = [item for item in [*style_files, *route_files] if "handler" in item.lower() or "handlers" in item.lower()]
-    chosen = handler_files[0] if handler_files else style_files[0] if style_files else route_files[0] if route_files else ""
-    if chosen and "/" in chosen.replace("\\", "/"):
-        parent = str(Path(chosen).parent).replace("\\", "/")
-        if module and parent.startswith(module + "/"):
-            return "./" + parent[len(module) + 1 :]
-        return "./" + parent
-    return "./..."
+def active_for_feature(scenario: Scenario) -> bool:
+    return scenario.status == "active"
 
 
-def local_command_preview(selected: str, detection: dict, scenario: Scenario) -> str:
-    if "go" in detection.get("languages", []):
-        module = go_module_prefix(detection)
-        package = go_package_for_selected(selected, detection)
-        command = f"go test -v {package} -run {scenario_test_name(scenario)} -count=1"
-        return f"cd {module} && {command}" if module else command
-    if "python" in detection.get("languages", []):
-        return f"pytest -k {scenario_test_name(scenario)}"
-    if "node" in detection.get("languages", []):
-        pm = "pnpm" if "pnpm" in detection.get("package_managers", []) else "yarn" if "yarn" in detection.get("package_managers", []) else "npm"
-        return f"{pm} test -- {scenario_test_name(scenario)}"
-    if "java" in detection.get("languages", []):
-        return f"mvn test -Dtest={scenario_test_name(scenario)}"
-    if "rust" in detection.get("languages", []):
-        return f"cargo test {scenario_test_name(scenario)}"
-    return detection.get("suggested_commands", [""])[0] if detection.get("suggested_commands") else ""
+def scenario_complete(scenario: Scenario) -> bool:
+    items = [*scenario.given, *scenario.when, *scenario.then]
+    return bool(scenario.given and scenario.when and scenario.then and not any("todo" in item.lower() for item in items))
 
 
-def suggested_runner_path(selected: str, detection: dict, scenario: Scenario) -> str:
-    stem = scenario.id.lower().replace("-", "_") + "_acceptance_test"
-    module = go_module_prefix(detection)
-    if "go" in detection.get("languages", []):
-        package = go_package_for_selected(selected, detection).strip("./")
-        parts = [part for part in [module, package, f"{stem}.go"] if part]
-        return "/".join(parts)
-    if "python" in detection.get("languages", []):
-        return f"tests/acceptance/test_{stem}.py"
-    if "node" in detection.get("languages", []):
-        ext = "ts" if any(str(item.get("file", "")).endswith(".ts") for item in detection.get("route_hints", [])) else "js"
-        return f"tests/acceptance/{stem}.{ext}"
-    if "java" in detection.get("languages", []):
-        return f"src/test/java/acceptance/{scenario_test_name(scenario)}.java"
-    if "rust" in detection.get("languages", []):
-        return f"tests/{stem}.rs"
-    return f".acceptance/units/{slugify(scenario.id, 'scenario')}/generated/{stem}.txt"
-
-
-def select_method(scenario: Scenario, detection: dict) -> tuple[str, str, str]:
-    if scenario.type != "auto":
-        selected = scenario.type
-        reason = f"acceptance.md explicitly sets type={scenario.type}."
-    else:
-        text = scenario.all_text().lower()
-        languages = detection.get("languages", [])
-        route_hints = detection.get("route_hints", [])
-        styles = detection.get("local_test_styles", {})
-        if any(word in text for word in ["cli", "command", "script", "脚本", "命令", "批处理"]):
-            selected = "local_script_test"
-            reason = "Scenario targets a script/command workflow; acceptance must execute existing local code or script with fixtures."
-        elif any(word in text for word in ["worker", "job", "queue", "mq", "消费者", "队列", "异步", "定时"]):
-            selected = "async_acceptance"
-            reason = "Scenario targets worker/job or asynchronous side effects; acceptance must trigger local worker code and poll observable side effects."
-        elif route_hints and any(word in text for word in ["api", "http", "接口", "请求", "响应", "登录", "login"]):
-            if "go" in languages and ("go_gin_handler" in styles or "go_httptest" in styles):
-                style_names = []
-                if "go_httptest" in styles:
-                    style_names.append("httptest")
-                if "go_gin_handler" in styles:
-                    style_names.append("Gin handler")
-                if "go_sqlmock" in styles:
-                    style_names.append("sqlmock")
-                style_text = "/".join(style_names) or "local Go test"
-                selected = "go_handler_test"
-                reason = f"Project exposes HTTP routes and existing Go {style_text} test style; validate the local handler/router, not a remote HTTP endpoint."
-            else:
-                selected = "local_handler_test"
-                reason = "Scenario targets an HTTP business entrypoint; validate through a local handler/router/test client, not a remote endpoint."
-        elif any(word in text for word in ["db", "mysql", "redis", "mq", "数据库", "表", "缓存"]):
-            selected = "integration_test"
-            reason = "Scenario mentions persistence or infrastructure side effects; use local fixtures, sqlmock, temporary DB, fake Redis/MQ, or test containers."
-        elif languages:
-            selected = "go_unit_test" if "go" in languages else "unit_test"
-            reason = "Scenario appears to target core rule/boundary behavior; use the existing local language test stack."
-        else:
-            selected = "manual_review"
-            reason = "No supported project language or execution entry point was detected."
-    command = local_command_preview(selected, detection, scenario)
-    return selected, reason, command
-
-
-def write_bindings_yaml(path: Path, unit_id: str, bindings: list[dict]) -> None:
-    lines = ["version: 1", f"unit_id: {unit_id}", "", "scenarios:"]
-    for binding in bindings:
-        lines.extend(
-            [
-                f"  {binding['id']}:",
-                f"    status: {binding['status']}",
-                f"    selected_type: {binding['selected_type']}",
-                "    execution_scope: local",
-                "    remote: false",
-                f"    reason: {binding['reason']!r}",
-                f"    command: {binding['command']!r}",
-                f"    runner: {binding['runner']!r}",
-                f"    plan_doc: {binding['plan_doc']!r}",
-                f"    execution_plan: {binding['execution_plan']!r}",
-                "    assertions:",
-            ]
-        )
-        for assertion in binding["assertions"]:
-            lines.append(f"      - {assertion!r}")
-    write_text(path, "\n".join(lines) + "\n")
-
-
-def yaml_dump(value, indent: int = 0) -> list[str]:
-    space = " " * indent
-    if isinstance(value, dict):
-        lines: list[str] = []
-        for key, item in value.items():
-            if isinstance(item, (dict, list)):
-                lines.append(f"{space}{key}:")
-                lines.extend(yaml_dump(item, indent + 2))
-            else:
-                lines.append(f"{space}{key}: {scalar(item)}")
-        return lines
-    if isinstance(value, list):
-        lines = []
-        if not value:
-            return [f"{space}[]"]
-        for item in value:
-            if isinstance(item, (dict, list)):
-                lines.append(f"{space}-")
-                lines.extend(yaml_dump(item, indent + 2))
-            else:
-                lines.append(f"{space}- {scalar(item)}")
-        return lines
-    return [f"{space}{scalar(value)}"]
-
-
-def write_plan_yaml(path: Path, plan: dict) -> None:
-    write_text(path, "\n".join(yaml_dump(plan)) + "\n")
-
-
-def route_hint_for_scenario(scenario: Scenario, detection: dict) -> dict:
+def infer_test_level(scenario: Scenario) -> str:
     text = scenario.all_text().lower()
-    for hint in detection.get("route_hints", []):
-        path = str(hint.get("path", "")).lower()
-        method = str(hint.get("method", "")).upper()
-        if path and (path in text or any(part and part in text for part in path.strip("/").split("/"))):
-            return {"type": "http_api", "method": method, "path": hint.get("path"), "source_file": hint.get("file")}
-    if detection.get("route_hints") and any(word in text for word in ["api", "http", "接口", "请求", "响应", "登录", "login"]):
-        hint = detection["route_hints"][0]
-        return {"type": "http_api", "method": hint.get("method"), "path": hint.get("path"), "source_file": hint.get("file")}
-    if any(word in text for word in ["script", "脚本", "命令", "统计", "report", "stats"]):
-        scripts = detection.get("local_scripts", [])
-        script = scripts[0] if scripts else {}
-        return {"type": "script", "path": script.get("file", "pending")}
-    return {"type": "local_code", "path": "pending"}
+    if any(term in text for term in ["browser", "playwright", "浏览器", "页面", "完整用户流程"]):
+        return "e2e"
+    if scenario.status == "manual":
+        return "manual"
+    return "integration"
 
 
-def split_case_groups(scenario: Scenario) -> dict:
-    raw = scenario.all_text().lower()
-    has_allowed_email = any(word in raw for word in ["gmail", "google", "谷歌", "outlook"])
-    has_positive = has_allowed_email or any(word in raw for word in ["valid", "success", "allow", "合法", "成功", "允许", "正确"])
-    has_negative = ("只支持" in raw or "only" in raw) or any(word in raw for word in ["invalid", "fail", "reject", "非法", "失败", "拒绝", "错误"])
-    has_boundary = bool(scenario.data) or any(word in raw for word in ["empty", "blank", "max", "min", "limit", "边界", "为空", "空值", "最大", "最小", "超长", "长度", "临界"])
-    has_side_effect = any(word in raw for word in ["db", "mysql", "redis", "mq", "file", "log", "数据库", "缓存", "队列", "消息", "文件", "日志", "写入", "不生成", "生成"])
-    needs_idempotency = any(word in raw for word in ["重复", "幂等", "idempotent", "rerun", "duplicate"])
-    needs_concurrency = any(word in raw for word in ["并发", "竞态", "concurrent", "race"])
-    needs_async = any(word in raw for word in ["异步", "队列", "mq", "worker", "job", "定时", "async", "queue"])
-    needs_external = any(word in raw for word in ["第三方", "外部", "短信", "邮件", "支付", "推送", "external", "sms", "email", "payment"])
-    needs_rollback = any(word in raw for word in ["回滚", "事务", "rollback", "transaction", "半成功"])
-    expected = {
-        "positive examples": has_positive,
-        "negative examples": has_negative,
-        "boundary examples": has_boundary,
-        "side-effect assertions": has_side_effect,
-    }
-    if needs_idempotency:
-        expected["idempotency expectation"] = "幂等" in scenario.all_text() or "idempotent" in raw
-    if needs_concurrency:
-        expected["concurrency expectation"] = True
-    if needs_async:
-        expected["async eventual assertion"] = any(word in raw for word in ["最终", "eventually", "轮询", "poll"])
-    if needs_external:
-        expected["external dependency failure handling"] = any(word in raw for word in ["失败", "超时", "timeout", "error", "异常"])
-    if needs_rollback:
-        expected["rollback/no-partial-success assertion"] = any(word in raw for word in ["回滚", "rollback", "不产生", "无副作用", "no side effect"])
-    return {
-        "positive_required": True,
-        "negative_required": True,
-        "boundary_required": True,
-        "side_effect_required": True,
-        "idempotency_required": needs_idempotency,
-        "concurrency_required": needs_concurrency,
-        "async_required": needs_async,
-        "external_dependency_required": needs_external,
-        "rollback_required": needs_rollback,
-        "positive_evidence_present": has_positive,
-        "negative_evidence_present": has_negative,
-        "boundary_evidence_present": has_boundary,
-        "side_effect_evidence_present": has_side_effect,
-        "missing_or_uncertain": [item for item, present in expected.items() if not present],
-    }
+def detect_dependencies(scenario: Scenario, context: str) -> list[dict]:
+    text = scenario.all_text().lower()
+    dependencies = []
+    for name, terms in DEPENDENCY_TERMS.items():
+        if not any(term in text for term in terms):
+            continue
+        mode = context_dependency_mode(context, name)
+        dependencies.append(
+            {
+                "name": name,
+                "mode": mode,
+                "reason": "context_explicitly_authorizes_mock" if mode == "mock" else "real_test_required_unless_context_explicitly_authorizes_mock",
+            }
+        )
+    return dependencies
 
 
-def atdd_quality_check(scenario: Scenario, case_groups: dict) -> dict:
-    missing: list[str] = []
-    if not scenario.given:
-        missing.append("Given business context")
-    if not scenario.when:
-        missing.append("When business action or event")
-    if not scenario.then:
-        missing.append("Then observable business result")
-    missing.extend(case_groups.get("missing_or_uncertain", []))
-    return {
-        "invest": {
-            "independent": "review_required",
-            "negotiable": "review_required",
-            "valuable": "review_required",
-            "estimable": "review_required",
-            "small": "review_required",
-            "testable": not missing and scenario.status == "active",
-        },
-        "three_amigos_prompts": {
-            "business": "Confirm business value, success result, and final acceptance owner.",
-            "development": "Confirm local entry point, state, data, dependencies, and safe fixtures.",
-            "testing": "Confirm negative paths, boundaries, side effects, regression risks, and manual demo needs.",
-        },
-        "missing_or_uncertain": missing,
-    }
+def style_evidence(detection: dict) -> list[dict]:
+    evidence = []
+    for style, items in detection.get("local_test_styles", {}).items():
+        for item in items:
+            evidence.append({"style": style, "file": item.get("file", "")})
+    return evidence[:20]
 
 
-def bdd_quality_check(scenario: Scenario) -> dict:
-    raw = scenario.all_text().lower()
-    how_markers = ["http://", "https://", "button", "按钮 id", "css", "xpath", "sql", "select *", "mock", "helper", "函数", "function"]
-    too_many_steps = len(scenario.given) + len(scenario.when) + len(scenario.then) > 10
-    return {
-        "gherkin_validity": {
-            "has_given": bool(scenario.given),
-            "has_when": bool(scenario.when),
-            "has_then": bool(scenario.then),
-            "one_behavior_preferred": True,
-            "step_count": len(scenario.given) + len(scenario.when) + len(scenario.then),
-        },
-        "declarative_language": {
-            "feature_should_describe_what_not_how": True,
-            "how_markers_detected": [marker for marker in how_markers if marker in raw],
-            "split_recommended": too_many_steps,
-        },
-        "living_documentation": {
-            "keep_feature_business_readable": True,
-            "put_json_sql_commands_and_bindings_in_execution_plan": True,
-        },
-    }
+def route_for(scenario: Scenario, detection: dict) -> dict:
+    text = scenario.all_text().lower()
+    tokens = [token for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", text) if len(token) >= 3]
+    for route in detection.get("route_hints", []):
+        route_text = f"{route.get('method', '')} {route.get('path', '')}".lower()
+        if any(token in route_text for token in tokens):
+            return {"type": "http", **route}
+    return {"type": "pending_agent_code_scan", "path": "pending"}
 
 
-def parse_data_value(value: str):
-    text = value.strip()
-    if not text:
-        return ""
-    for parser in (json.loads, ast.literal_eval):
-        try:
-            parsed = parser(text)
-            if isinstance(parsed, (str, int, float, bool, list, dict)):
-                return parsed
-        except Exception:
-            pass
-    return text
-
-
-def parse_data_entries(scenario: Scenario) -> dict:
-    entries: dict[str, object] = {}
-    loose: list[str] = []
+def case_ids(scenario: Scenario) -> list[str]:
+    found = []
     for item in scenario.data:
-        if ":" in item:
-            key, value = item.split(":", 1)
-            entries[slugify(key, "data").replace("-", "_")] = parse_data_value(value)
-        else:
-            loose.append(item)
-    if loose:
-        entries["items"] = loose
-    return entries
+        match = re.search(r"(?:case[_ -]?id)\s*[:=]\s*([A-Za-z0-9_-]+)", item, re.I)
+        if match:
+            found.append(match.group(1))
+    return found or ["case-001"]
 
 
-def list_from_entries(entries: dict, names: list[str]) -> list[str]:
-    values: list[str] = []
-    for name in names:
-        value = entries.get(name)
-        if isinstance(value, list):
-            values.extend(str(item) for item in value)
-        elif value is not None and value != "":
-            values.append(str(value))
-    return values
+def existing_scenarios(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    payload = load_yaml(path)
+    return {item.get("id", ""): item for item in payload.get("scenarios", []) if item.get("id")}
 
 
-def derive_email_examples(scenario: Scenario, entries: dict) -> dict:
-    text = scenario.all_text().lower()
-    valid = list_from_entries(entries, ["valid_emails", "allowed_emails", "valid_email", "allowed_email"])
-    invalid = list_from_entries(entries, ["invalid_emails", "rejected_emails", "invalid_email", "rejected_email"])
-    allowed_domains = list_from_entries(entries, ["allowed_domains", "valid_domains", "allowed_domain", "valid_domain"])
-    rejected_domains = list_from_entries(entries, ["rejected_domains", "invalid_domains", "rejected_domain", "invalid_domain"])
-
-    if "gmail" in text or "google" in text or "谷歌" in text:
-        allowed_domains.append("gmail.com")
-    if "outlook" in text:
-        allowed_domains.append("outlook.com")
-
-    allowed_domains = sorted(set(item.strip().lstrip("@") for item in allowed_domains if item.strip()))
-    rejected_domains = sorted(set(item.strip().lstrip("@") for item in rejected_domains if item.strip()))
-
-    for domain in allowed_domains:
-        valid.append(f"user@{domain}")
-    if ("只支持" in text or "only" in text) and allowed_domains and not rejected_domains:
-        rejected_domains.extend(["qq.com", "yahoo.com", "example.com"])
-    for domain in rejected_domains:
-        invalid.append(f"user@{domain}")
-    if any(word in text for word in ["email", "邮箱", "mail", "格式", "format"]):
-        invalid.extend(["abc", "user@", "@gmail.com"])
-
-    return {
-        "valid": sorted(set(valid)),
-        "invalid": sorted(set(invalid)),
-        "allowed_domains": allowed_domains,
-        "rejected_domains": sorted(set(rejected_domains)),
-    }
+def feature_scenario(payload: dict) -> Scenario:
+    return Scenario(
+        id=payload["id"],
+        title=payload["title"],
+        status="active",
+        source="feature",
+        given=list(payload.get("given", [])),
+        when=list(payload.get("when", [])),
+        then=list(payload.get("then", [])),
+        data=[f"case_id={case_id}" for case_id in payload.get("case_ids", [])],
+        tags=" ".join(payload.get("tags", [])),
+    )
 
 
-def derive_generic_examples(scenario: Scenario, entries: dict) -> dict:
-    return {
-        "valid": list_from_entries(entries, ["valid", "valid_values", "allowed", "valid_codes", "success_cases"]),
-        "invalid": list_from_entries(entries, ["invalid", "invalid_values", "rejected", "invalid_codes", "fail_cases"]),
-    }
+def append_feature_scenarios(current: str, unit_id: str, scenarios: list[Scenario]) -> str:
+    if not current.strip():
+        return render_feature(unit_id, scenarios)
+    if not scenarios:
+        return current
+    rendered = render_feature(unit_id, scenarios).splitlines()
+    scenario_block = "\n".join(rendered[2:]).strip()
+    return current.rstrip() + "\n\n" + scenario_block + "\n"
 
 
-def request_payload_for_case(scenario: Scenario, route: dict, value: str, kind: str) -> dict:
-    text = scenario.all_text().lower()
-    if route.get("type") == "http_api" or any(word in text for word in ["api", "http", "接口", "请求", "响应", "登录", "login"]):
-        payload: dict[str, object] = {}
-        if any(word in text for word in ["login", "登录"]):
-            payload.update(
-                {
-                    "loginType": "password",
-                    "accountType": "email" if any(word in text for word in ["email", "邮箱"]) else "pending_from_code",
-                    "account": value or "pending_from_acceptance",
-                    "password": "<valid password fixture>",
-                }
-            )
-        elif value:
-            payload["value"] = value
-        else:
-            payload["body"] = "pending_from_acceptance"
-        return {
-            "content_type": "application/json",
-            "method": route.get("method") or "pending_from_code",
-            "path": route.get("path") or "pending_from_code",
-            "json": payload,
-        }
-    if any(word in text for word in ["script", "脚本", "命令", "统计", "report", "stats"]):
-        return {"args": scenario.data, "fixtures": "derive from acceptance Data and existing script inputs"}
-    return {"value": value or "pending_from_acceptance", "kind": kind}
+def merged_dependencies(previous: list[dict], detected: list[dict]) -> list[dict]:
+    merged = {str(item.get("name", "")): dict(item) for item in previous if item.get("name")}
+    for item in detected:
+        name = str(item.get("name", ""))
+        current = merged.get(name, {})
+        current.update(item)
+        merged[name] = current
+    return list(merged.values())
 
 
-def assertion_for_case(scenario: Scenario, kind: str) -> dict:
-    negative = kind in {"negative", "boundary_invalid", "external_failure"}
-    return {
-        "expected_behavior": scenario.then,
-        "response_or_output": {
-            "polarity": "failure" if negative else "success_or_continue",
-            "http_status": "derive_from_existing_local_response_shape",
-            "business_code": "uncertain_from_acceptance_if_not_specified",
-            "json_body": "derive_fields_from_current_code_response_model",
-            "stdout": "assert when validating CLI/script behavior",
-            "stderr": "assert when validating CLI/script errors",
-        },
-        "side_effects": {
-            "db": "assert required DB changes; for early validation failure assert no unexpected writes",
-            "redis": "assert required Redis changes or none",
-            "mq": "assert required messages or none",
-            "files": "assert required file/log output or none",
-            "external_calls": "use fake server/mock transport; never call real external services by default",
-        },
-    }
-
-
-def dependency_resolution_for_case(scenario: Scenario, kind: str, context_present: bool) -> dict:
-    raw = scenario.all_text().lower()
-    early_failure = kind in {"negative", "boundary_invalid"} or any(word in raw for word in ["非法", "无效", "invalid", "reject", "拒绝", "错误"])
-    needs_state = any(word in raw for word in ["db", "mysql", "redis", "mq", "数据库", "缓存", "队列", "消息", "写入", "状态", "流水", "余额"])
-    external = any(word in raw for word in ["第三方", "外部", "短信", "邮件", "支付", "推送", "external", "sms", "email", "payment"])
-    base = {
-        "mysql": {
-            "required_by_assertion": needs_state and "mysql" in raw or "数据库" in raw or "db" in raw,
-            "context_config_found": context_present,
-            "selected_mode": "no_access_mock" if early_failure else "real_test_if_safe_else_fake_or_pending",
-            "reason": "Early validation failures must prove downstream persistence is not accessed." if early_failure else "Use real local/test/sandbox state only when the assertion requires final persisted state and safe config exists.",
-        },
-        "redis": {
-            "required_by_assertion": needs_state and ("redis" in raw or "缓存" in raw),
-            "context_config_found": context_present,
-            "selected_mode": "no_access_mock" if early_failure else "fake_or_real_test_if_safe",
-            "reason": "Use no-access fake for early rejection; otherwise use a safe fake/test instance when cache state is observable.",
-        },
-        "mq": {
-            "required_by_assertion": needs_state and ("mq" in raw or "队列" in raw or "消息" in raw),
-            "context_config_found": context_present,
-            "selected_mode": "fake_queue_or_local_consumer",
-            "reason": "Do not call remote MQ by default; trigger local producer/consumer logic and assert messages or final state.",
-        },
-        "external_http": {
-            "required_by_assertion": external,
-            "context_config_found": context_present,
-            "selected_mode": "fake_server_or_mock_transport",
-            "reason": "External services, SMS, email, payment, and push are faked by default; real calls require separate confirmation.",
-        },
-    }
-    return base
-
-
-def mock_contract_for_case(scenario: Scenario, kind: str) -> dict:
-    return {
-        "required_when_using_mock_fake_or_stub": True,
-        "rules": [
-            "Mock/fake/stub may replace only dependencies, never the business code entry point under acceptance.",
-            "Response fields, types, error shape, status, headers, and serialization must come from current-code contracts.",
-            "Mark the case uncertain or pending if the dependency contract cannot be confirmed from code evidence.",
-        ],
-        "expected_contract_sources": [
-            "DTO/struct/schema/interface",
-            "OpenAPI/proto/GraphQL schema",
-            "database model or scan fields",
-            "existing fixtures",
-            "fields actually read by the current caller",
-        ],
-        "status": "must_refine_from_current_code",
-        "case_kind": kind,
-    }
-
-
-def build_execution_cases(scenario: Scenario, binding: dict, detection: dict, context_present: bool) -> list[dict]:
-    route = route_hint_for_scenario(scenario, detection)
-    entries = parse_data_entries(scenario)
-    examples = derive_email_examples(scenario, entries) if any(word in scenario.all_text().lower() for word in ["email", "邮箱", "mail"]) else derive_generic_examples(scenario, entries)
-    raw_cases: list[tuple[str, str, str]] = []
-    for idx, value in enumerate(examples["valid"][:3], 1):
-        raw_cases.append((f"positive_{idx}", "positive", value))
-    for idx, value in enumerate(examples["invalid"][:5], 1):
-        raw_cases.append((f"negative_{idx}", "negative", value))
-    for idx, value in enumerate(list_from_entries(entries, ["boundary", "boundary_values", "min_values", "max_values"])[:5], 1):
-        raw_cases.append((f"boundary_{idx}", "boundary", value))
-    case_groups = split_case_groups(scenario)
-    if not raw_cases and case_groups.get("negative_evidence_present"):
-        raw_cases.append(("negative_1", "negative", "pending_from_acceptance"))
-    if not raw_cases and case_groups.get("positive_evidence_present"):
-        raw_cases.append(("positive_1", "positive", "pending_from_acceptance"))
-    if not raw_cases:
-        raw_cases.append(("case_001", "uncertain", ""))
-
-    cases = []
-    for case_id, kind, value in raw_cases:
-        cases.append(
-            {
-                "id": case_id,
-                "title": f"{scenario.title} - {kind}",
-                "input": {
-                    "source": "acceptance.md",
-                    "given": scenario.given,
-                    "when": scenario.when,
-                    "data": entries,
-                    "request_or_args": request_payload_for_case(scenario, route, value, kind),
-                },
-                "execute": {
-                    "scope": "local",
-                    "remote": False,
-                    "mode": binding["selected_type"],
-                    "business_entrypoint": route,
-                    "validation_entrypoint": {
-                        "must_be_local_code": True,
-                        "selected_type": binding["selected_type"],
-                        "command_preview": binding["command"],
-                    },
-                    "fixtures_or_mocks": {
-                        "db": "use existing local test helper, sqlmock, temporary DB, or fixture",
-                        "redis": "use fake/miniredis/test instance when needed",
-                        "mq": "use fake queue or in-process consumer trigger when needed",
-                        "external_http": "use local fake server/mock transport when needed",
-                    },
-                    "timeout_seconds": 120,
-                    "continue_batch_on_failure": True,
-                },
-                "assert": assertion_for_case(scenario, kind),
-                "dependency_resolution": dependency_resolution_for_case(scenario, kind, context_present),
-                "mock_contract": mock_contract_for_case(scenario, kind),
-            }
-        )
-    return cases
-
-
-def build_execution_plan(unit_id: str, feature_title: str, scenarios: list[Scenario], bindings: list[dict], detection: dict, context_present: bool) -> dict:
-    binding_map = {binding["id"]: binding for binding in bindings}
-    plans = []
+def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: list[Scenario], feature_scenarios: dict[str, dict], detection: dict, context: str, mode: str, existing: dict[str, dict], intake_hashes: dict[str, str]) -> dict:
+    project_style = style_evidence(detection)
+    mapped = []
     for scenario in scenarios:
-        binding = binding_map[scenario.id]
-        case_groups = split_case_groups(scenario)
-        atdd_quality = atdd_quality_check(scenario, case_groups)
-        bdd_quality = bdd_quality_check(scenario)
-        plans.append(
+        previous = existing.get(scenario.id, {})
+        parsed_feature = feature_scenarios.get(scenario.id, {})
+        canonical_hash = parsed_feature.get("feature_hash", scenario.source_hash())
+        changed = previous.get("feature_hash") != canonical_hash
+        generated_tests = previous.get("generated_tests", [])
+        pending_assertions = [{"then": item, "test_assertion": "pending_generation"} for item in scenario.then]
+        assertions = pending_assertions if changed else previous.get("assertion_mapping", pending_assertions)
+        dependencies = merged_dependencies(previous.get("dependency_resolution", []), detect_dependencies(scenario, context))
+        mapped.append(
             {
-                "scenario_id": scenario.id,
+                "id": scenario.id,
                 "title": scenario.title,
-                "status": binding["status"],
-                "scope": "local",
-                "remote": False,
-                "validation_method": {
-                    "type": binding["selected_type"],
-                    "reason": binding["reason"],
-                },
-                "case_coverage": case_groups,
-                "atdd_quality_check": atdd_quality,
-                "bdd_quality_check": bdd_quality,
-                "missing_acceptance_questions": atdd_quality["missing_or_uncertain"],
-                "manual_acceptance_required": scenario.status == "manual",
-                "code_evidence": {
-                    "codegraph_available": detection.get("codegraph_available", False),
-                    "languages": detection.get("languages", []),
-                    "modules": detection.get("modules", {}),
-                    "route_hints": detection.get("route_hints", [])[:10],
-                    "local_test_styles": detection.get("local_test_styles", {}),
-                    "local_scripts": detection.get("local_scripts", [])[:20],
-                },
-                "cases": build_execution_cases(scenario, binding, detection, context_present),
-                "generated_assets_preview": [
-                    binding["runner"],
-                    binding["plan_doc"],
-                    "feature.feature",
-                    "bindings.yaml",
-                    "compiled/bindings.json",
-                    "compiled/execution_plan.preview.json",
-                    "compiled/execution_plan.preview.yaml",
-                ],
-                "command_preview": [binding["command"]] if binding["command"] else [],
-                "execution_policy": {
-                    "can_modify_business_code": False,
-                    "generate_after_feature_confirm": True,
-                    "run_after_second_confirm": True,
-                    "batch_continue_on_failure": True,
-                    "default_remote_execution": False,
-                },
-                "uncertain": case_groups["missing_or_uncertain"],
+                "status": scenario.status,
+                "feature_hash": canonical_hash,
+                "intake_hash": intake_hashes.get(scenario.id, previous.get("intake_hash", "")),
+                "selected": bool(changed),
+                "selection_reason": "feature_added_or_changed" if changed else "not_selected_unchanged",
+                "test_level": previous.get("test_level", infer_test_level(scenario)),
+                "case_ids": parsed_feature.get("case_ids") or previous.get("case_ids", case_ids(scenario)),
+                "business_entrypoint": previous.get("business_entrypoint", route_for(scenario, detection)),
+                "validation_entrypoint": previous.get("validation_entrypoint", "pending_agent_code_scan"),
+                "style_evidence": previous.get("style_evidence", project_style),
+                "dependency_resolution": dependencies,
+                "assertion_mapping": assertions,
+                "generated_tests": generated_tests,
+                "generated_tests_stale": bool(previous.get("generated_tests_stale") or (changed and generated_tests)),
+                "repair_state": previous.get("repair_state", "not_required"),
             }
         )
     return {
-        "version": 1,
-        "unit_id": unit_id,
-        "title": feature_title,
-        "context_present": context_present,
-        "plans": plans,
+        "version": 2,
+        "unit": unit_id,
+        "feature": feature_file.name,
+        "feature_hash": hash_text(feature_text),
+        "canonical_source": "feature",
+        "intake_source": "acceptance.md",
+        "mode": mode,
+        "project": {
+            "languages": detection.get("languages", []),
+            "test_frameworks": detection.get("test_frameworks", []),
+            "bdd_tools": detection.get("bdd_tools", []),
+            "modules": detection.get("modules", {}),
+        },
+        "context_present": bool(context),
+        "execution_policy": {
+            "incremental_only": True,
+            "full_repository_run_forbidden_by_default": True,
+            "real_middleware_required_unless_context_allows_mock": True,
+            "production_code_fix_requires_confirmation": True,
+        },
+        "scenarios": mapped,
     }
 
 
-def write_lock(path: Path, unit_id: str, scenarios: list[Scenario], bindings: list[dict]) -> None:
-    lines = ["version: 1", f"unit_id: {unit_id}", "scenarios:"]
-    binding_map = {item["id"]: item for item in bindings}
-    for scenario in scenarios:
-        binding = binding_map.get(scenario.id, {})
-        lines.extend(
-            [
-                f"  {scenario.id}:",
-                f"    source_hash: {scenario.source_hash()}",
-                "    generated_files:",
-                "      - feature.feature",
-                "      - bindings.yaml",
-                "      - compiled/acceptance.normalized.yaml",
-                "      - compiled/bindings.json",
-                "      - compiled/execution_plan.preview.json",
-                "      - compiled/execution_plan.preview.yaml",
-                f"      - {binding.get('plan_doc', '')}",
-                f"      - {binding.get('runner', '')}",
-                f"    last_selected_type: {binding.get('selected_type', 'pending')}",
-            ]
-        )
-    write_text(path, "\n".join(lines) + "\n")
-
-
-def write_plan(unit_path: Path, scenario: Scenario, binding: dict, locale: str) -> str:
-    filename = f"{scenario.id.lower().replace('-', '_')}_acceptance_plan.md"
-    rel = f"generated/{filename}"
-    path = unit_path / rel
-    if locale == "en":
-        text = (
-            f"# {scenario.id} {scenario.title}\n\n"
-            "Generated after feature and execution-plan confirmation. Generate acceptance code from the structured execution plan only; do not modify production code.\n\n"
-            f"- selected_type: {binding['selected_type']}\n"
-            f"- reason: {binding['reason']}\n"
-            f"- command_preview: `{binding['command']}`\n"
-            f"- runner: `{binding['runner']}`\n"
-            f"- execution_plan: `{binding['execution_plan']}`\n"
-            "- scope: local\n"
-            "- remote: false\n"
-        )
-    else:
-        text = (
-            f"# {scenario.id} {scenario.title}\n\n"
-            "这是 feature 和执行计划确认后生成的验收计划索引。只能根据结构化 execution plan 生成验收代码，禁止修改生产业务代码。\n\n"
-            f"- selected_type: {binding['selected_type']}\n"
-            f"- reason: {binding['reason']}\n"
-            f"- command_preview: `{binding['command']}`\n"
-            f"- runner: `{binding['runner']}`\n"
-            f"- execution_plan: `{binding['execution_plan']}`\n"
-            "- scope: local\n"
-            "- remote: false\n"
-        )
-    write_text(path, text)
-    return rel
+def preview_payload(unit_id: str, scenarios: list[Scenario], detection: dict, context: str, mode: str) -> dict:
+    return {
+        "unit": unit_id,
+        "mode": mode,
+        "canonical_source_after_confirmation": "feature",
+        "languages": detection.get("languages", []),
+        "test_frameworks": detection.get("test_frameworks", []),
+        "style_evidence": style_evidence(detection),
+        "scenarios": [
+            {
+                "id": scenario.id,
+                "status": scenario.status,
+                "complete": scenario_complete(scenario),
+                "test_level": infer_test_level(scenario),
+                "business_entrypoint": route_for(scenario, detection),
+                "dependencies": detect_dependencies(scenario, context),
+                "assertions": scenario.then,
+            }
+            for scenario in scenarios
+        ],
+        "next_step": "generate executable acceptance tests in the current project's existing style, then record their paths and exact selectors in acceptance-map.yaml",
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--unit", required=True)
-    parser.add_argument("--scenario", help="Compile only one scenario id.")
+    parser.add_argument("--scenario", help="Compile only one scenario ID.")
     parser.add_argument("--locale", choices=["auto", "zh", "en"], default="auto")
-    parser.add_argument("--confirmed", action="store_true", help="Required: user confirmed the feature preview.")
+    parser.add_argument("--mode", choices=["manual", "auto"], default="manual")
+    parser.add_argument("--confirmed", action="store_true", help="The user confirmed the Feature and generation preview.")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
     locale = default_locale_from_script() if args.locale == "auto" else args.locale
     unit_id = slugify(args.unit, "unit")
     unit_path = unit_dir(project_root, unit_id, locale)
-    acceptance_file = unit_path / "acceptance.md"
-    feature_title, scenarios = parse_acceptance_md(acceptance_file)
+    _, scenarios = parse_acceptance_md(unit_path / "acceptance.md")
     if args.scenario:
-        scenarios = [s for s in scenarios if s.id == args.scenario]
+        scenarios = [scenario for scenario in scenarios if scenario.id == args.scenario]
     if not scenarios:
-        print("No scenarios found.")
+        print("No acceptance scenarios found.")
         return 1
 
-    context = read_config_context(project_root)
+    active = [scenario for scenario in scenarios if active_for_feature(scenario)]
+    target_feature = feature_path(unit_path, unit_id)
+    target_map = acceptance_map_path(unit_path)
+    existing = existing_scenarios(target_map)
+    existing_text = target_feature.read_text(encoding="utf-8") if target_feature.exists() else ""
+    existing_feature_scenarios: list[dict] = []
+    if existing_text:
+        _, existing_feature_scenarios, feature_errors = parse_feature(existing_text)
+        if feature_errors:
+            print("Existing canonical Feature is invalid. Fix it before compiling intake changes:")
+            for error in feature_errors:
+                print(f"- {error}")
+            return 2
+
+    existing_ids = {item["id"] for item in existing_feature_scenarios}
+    changed_intake = [scenario for scenario in active if existing.get(scenario.id, {}).get("intake_hash") != scenario.source_hash()]
+    conflicts = [scenario for scenario in changed_intake if scenario.id in existing_ids]
+    additions = [scenario for scenario in changed_intake if scenario.id not in existing_ids]
+    merged_feature = append_feature_scenarios(existing_text, unit_id, additions if existing_text else active)
+    _, parsed_feature_scenarios, feature_errors = parse_feature(merged_feature)
+    if feature_errors:
+        print("Proposed canonical Feature is invalid:")
+        for error in feature_errors:
+            print(f"- {error}")
+        return 2
+    context = read_config_context(project_root).get("context", "")
     detection = detect(project_root)
-    active_scenarios = [s for s in scenarios if s.status == "active"]
+    preview = preview_payload(unit_id, scenarios, detection, context, args.mode)
 
-    bindings: list[dict] = []
-    for scenario in scenarios:
-        selected, reason, command = select_method(scenario, detection)
-        status = "active" if scenario.status == "active" and command else "pending"
-        if scenario.status != "active":
-            status = scenario.status
-        binding = {
-            "id": scenario.id,
-            "title": scenario.title,
-            "status": status,
-            "selected_type": selected,
-            "reason": reason,
-            "command": scenario.command or command,
-            "runner": scenario.runner or suggested_runner_path(selected, detection, scenario),
-            "plan_doc": f"generated/{scenario.id.lower().replace('-', '_')}_acceptance_plan.md",
-            "execution_plan": "compiled/execution_plan.preview.yaml",
-            "assertions": scenario.then,
-            "source_hash": scenario.source_hash(),
-            "context_present": bool(context.get("context")),
-            "execution_scope": "local",
-            "remote": False,
-        }
-        bindings.append(binding)
+    print("Feature change preview:")
+    if additions or not existing_text:
+        print(render_feature(unit_id, additions if existing_text else active))
+    else:
+        print("(no additive Feature change)")
+    print("Generation preview:")
+    print(json.dumps(preview, ensure_ascii=False, indent=2))
 
-    execution_plan = build_execution_plan(unit_id, feature_title or unit_id, scenarios, bindings, detection, bool(context.get("context")))
-
-    if not args.confirmed:
-        print("Feature preview confirmation is required before generating validation assets.")
-        print("")
-        print("Incremental feature preview:")
-        print(render_feature(feature_title or unit_id, scenarios))
-        print("Execution plan preview:")
-        print("\n".join(yaml_dump(execution_plan)))
-        print("")
-        print("Confirm the feature and execution plan before running again with --confirmed.")
+    if conflicts:
+        print("Intake changes conflict with existing canonical Feature scenarios:")
+        for scenario in conflicts:
+            print(f"- {scenario.id}: edit and confirm the canonical Feature directly, then run acceptance_feature.py")
         return 2
 
-    write_normalized_yaml(unit_path / "compiled" / "acceptance.normalized.yaml", unit_id, feature_title or unit_id, scenarios)
-    write_text(unit_path / "feature.feature", render_feature(feature_title or unit_id, scenarios))
-    dump_json(unit_path / "compiled" / "execution_plan.preview.json", execution_plan)
-    write_plan_yaml(unit_path / "compiled" / "execution_plan.preview.yaml", execution_plan)
-    for scenario, binding in zip(scenarios, bindings):
-        binding["plan_doc"] = write_plan(unit_path, scenario, binding, locale)
+    incomplete = [scenario.id for scenario in active if not scenario_complete(scenario)]
+    if incomplete:
+        print(f"Cannot confirm incomplete scenarios: {', '.join(incomplete)}")
+        return 2
+    if args.mode == "manual" and not args.confirmed:
+        print("Manual mode requires user confirmation before updating the canonical Feature.")
+        return 2
 
-    write_bindings_yaml(unit_path / "bindings.yaml", unit_id, bindings)
-    dump_json(unit_path / "compiled" / "bindings.json", {"version": 1, "unit_id": unit_id, "scenarios": bindings})
-    write_lock(unit_path / "acceptance.lock.yaml", unit_id, scenarios, bindings)
-
-    print("Generated acceptance assets:")
-    for rel in [
-        "compiled/acceptance.normalized.yaml",
-        "compiled/execution_plan.preview.json",
-        "compiled/execution_plan.preview.yaml",
-        "feature.feature",
-        "bindings.yaml",
-        "compiled/bindings.json",
-        "acceptance.lock.yaml",
-    ]:
-        print(f"- {unit_path / rel}")
-    print("Generated plan docs:")
-    for binding in bindings:
-        print(f"- {unit_path / binding['plan_doc']}")
-    print("Suggested executable acceptance code paths:")
-    for binding in bindings:
-        print(f"- {project_root / binding['runner']}")
-    if active_scenarios:
-        print("Suggested commands:")
-        for binding in bindings:
-            if binding["command"]:
-                print(f"- {binding['id']}: {binding['command']}")
-        print("Run acceptance only after explicit execution confirmation.")
+    parsed_by_id = {scenario["id"]: scenario for scenario in parsed_feature_scenarios}
+    canonical_scenarios = [feature_scenario(item) for item in parsed_feature_scenarios]
+    intake_hashes = {scenario.id: scenario.source_hash() for scenario in active}
+    mapping = build_map(unit_id, target_feature, merged_feature, canonical_scenarios, parsed_by_id, detection, context, args.mode, existing, intake_hashes)
+    write_text(target_feature, merged_feature)
+    write_yaml(target_map, mapping)
+    print("Updated canonical acceptance assets:")
+    print(f"- {target_feature}")
+    print(f"- {target_map}")
+    print("No executable acceptance test code has been claimed yet. Generate it in the project's existing test style and record it in acceptance-map.yaml.")
     return 0
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from acceptance_common import acceptance_root, read_config_context, read_text
 
 
-TEXT_SUFFIXES = {".go", ".py", ".js", ".ts", ".tsx", ".java", ".rs", ".kt", ".yml", ".yaml", ".toml", ".json", ".xml"}
+TEXT_SUFFIXES = {".go", ".py", ".js", ".ts", ".tsx", ".java", ".rs", ".kt", ".dart", ".cs", ".php", ".yml", ".yaml", ".toml", ".json", ".xml"}
 IGNORED_DIRS = {".git", "node_modules", "vendor", "target", "dist", "build", ".acceptance", "temp", "tmp"}
 
 
@@ -34,9 +34,12 @@ def read_if_exists(path: Path) -> str:
     return read_text(path) if path.exists() and path.is_file() else ""
 
 
-def package_json(root: Path) -> dict:
-    path = root / "package.json"
-    if not path.exists():
+def module_dir(root: Path, path: Path | None) -> str:
+    return path.parent.relative_to(root).as_posix() if path else ""
+
+
+def package_json(path: Path | None) -> dict:
+    if path is None or not path.exists():
         return {}
     try:
         return json.loads(read_text(path))
@@ -139,45 +142,91 @@ def scan_local_scripts(root: Path, limit: int = 200) -> list[dict]:
     return results
 
 
+def scan_middleware_config_hints(root: Path, limit: int = 100) -> list[dict]:
+    """Return config file paths and dependency kinds without exposing secrets."""
+    results: list[dict] = []
+    needles = {
+        "mysql": ["mysql", "mariadb"],
+        "postgres": ["postgres", "postgresql"],
+        "redis": ["redis"],
+        "kafka": ["kafka"],
+        "mq": ["rabbitmq", "amqp"],
+        "object_storage": ["minio", "s3"],
+    }
+    candidate_names = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".env.test", ".env.local"}
+    for path in root.rglob("*"):
+        if len(results) >= limit:
+            break
+        if not path.is_file() or any(part in IGNORED_DIRS for part in path.parts):
+            continue
+        lowered_name = path.name.lower()
+        if lowered_name not in candidate_names and not any(token in lowered_name for token in ["test", "local", "sandbox", "docker"]):
+            continue
+        try:
+            lowered = read_text(path).lower()
+        except Exception:
+            continue
+        kinds = sorted(name for name, values in needles.items() if any(value in lowered for value in values))
+        if kinds:
+            results.append({"file": str(path.relative_to(root)), "dependencies": kinds})
+    return results
+
+
 def detect(root: Path) -> dict:
-    pkg = package_json(root)
-    pyproject = read_if_exists(root / "pyproject.toml")
-    requirements = "\n".join(read_if_exists(root / name) for name in ["requirements.txt", "requirements-dev.txt"])
+    package_path = find_first(root, "package.json")
+    pyproject_path = find_first(root, "pyproject.toml")
+    requirements_path = find_first(root, "requirements.txt") or find_first(root, "requirements-dev.txt")
+    gradle_path = find_first(root, "build.gradle") or find_first(root, "build.gradle.kts")
+    pubspec_path = find_first(root, "pubspec.yaml")
+    composer_path = find_first(root, "composer.json")
+    csproj_path = next((path for path in root.rglob("*.csproj") if not any(part in IGNORED_DIRS for part in path.parts)), None)
+    kotlin_path = next((path for path in root.rglob("*.kt") if not any(part in IGNORED_DIRS for part in path.parts)), None)
+    pkg = package_json(package_path)
+    pyproject = read_if_exists(pyproject_path) if pyproject_path else ""
+    requirements = read_if_exists(requirements_path) if requirements_path else ""
     go_mod = find_first(root, "go.mod")
     cargo_path = find_first(root, "Cargo.toml")
     pom_path = find_first(root, "pom.xml")
     cargo = read_if_exists(cargo_path) if cargo_path else ""
     pom = read_if_exists(pom_path) if pom_path else ""
-    gradle = "\n".join(read_if_exists(root / name) for name in ["build.gradle", "build.gradle.kts"])
+    gradle = read_if_exists(gradle_path) if gradle_path else ""
 
     languages = []
     if go_mod:
         languages.append("go")
-    if file_exists(root, "pyproject.toml", "requirements.txt", "setup.py", "pytest.ini"):
+    if pyproject_path or requirements_path or find_first(root, "setup.py") or find_first(root, "pytest.ini"):
         languages.append("python")
-    if file_exists(root, "package.json"):
+    if package_path:
         languages.append("node")
-    if file_exists(root, "pom.xml", "build.gradle", "build.gradle.kts"):
+    if pom_path or gradle_path:
         languages.append("java")
+    if kotlin_path:
+        languages.append("kotlin")
     if cargo_path:
         languages.append("rust")
+    if pubspec_path:
+        languages.append("flutter")
+    if csproj_path:
+        languages.append("dotnet")
+    if composer_path:
+        languages.append("php")
 
     package_managers = []
     if go_mod:
         package_managers.append("go")
-    if file_exists(root, "pnpm-lock.yaml"):
+    if find_first(root, "pnpm-lock.yaml"):
         package_managers.append("pnpm")
-    elif file_exists(root, "yarn.lock"):
+    elif find_first(root, "yarn.lock"):
         package_managers.append("yarn")
-    elif file_exists(root, "package-lock.json", "package.json"):
+    elif find_first(root, "package-lock.json") or package_path:
         package_managers.append("npm")
-    if file_exists(root, "poetry.lock"):
+    if find_first(root, "poetry.lock"):
         package_managers.append("poetry")
-    elif file_exists(root, "pyproject.toml", "requirements.txt"):
+    elif pyproject_path or requirements_path:
         package_managers.append("pip")
-    if file_exists(root, "pom.xml"):
+    if pom_path:
         package_managers.append("maven")
-    if file_exists(root, "build.gradle", "build.gradle.kts", "gradlew", "gradlew.bat"):
+    if gradle_path or find_first(root, "gradlew") or find_first(root, "gradlew.bat"):
         package_managers.append("gradle")
     if cargo_path:
         package_managers.append("cargo")
@@ -189,7 +238,7 @@ def detect(root: Path) -> dict:
         if go_mod and "godog" in read_if_exists(go_mod):
             bdd_tools.append("godog")
     if "python" in languages:
-        if "pytest" in pyproject or "pytest" in requirements or file_exists(root, "pytest.ini", "conftest.py"):
+        if "pytest" in pyproject or "pytest" in requirements or find_first(root, "pytest.ini") or find_first(root, "conftest.py"):
             test_frameworks.append("pytest")
         if "pytest-bdd" in pyproject or "pytest-bdd" in requirements:
             bdd_tools.append("pytest-bdd")
@@ -214,22 +263,7 @@ def detect(root: Path) -> dict:
         if "assert_cmd" in cargo:
             test_frameworks.append("assert_cmd")
 
-    commands = []
-    if "go" in languages:
-        module_dir = go_mod.parent if go_mod else root
-        if module_dir == root:
-            commands.append("go test ./...")
-        else:
-            commands.append(f"cd {module_dir.relative_to(root).as_posix()} && go test ./...")
-    if "python" in languages:
-        commands.append("pytest")
-    if "node" in languages:
-        pm = "pnpm" if "pnpm" in package_managers else "yarn" if "yarn" in package_managers else "npm"
-        commands.append(f"{pm} test")
-    if "java" in languages:
-        commands.append("mvn test" if "maven" in package_managers else "./gradlew test")
-    if "rust" in languages:
-        commands.append("cargo test")
+    candidate_adapters = [language for language in ["go", "python", "node", "java", "kotlin", "rust", "flutter", "dotnet", "php"] if language in languages]
 
     context = read_config_context(root)
     return {
@@ -244,17 +278,29 @@ def detect(root: Path) -> dict:
         "languages": languages,
         "package_managers": package_managers,
         "modules": {
-            "go": str(go_mod.parent.relative_to(root)) if go_mod else "",
-            "rust": str(cargo_path.parent.relative_to(root)) if cargo_path else "",
-            "java": str(pom_path.parent.relative_to(root)) if pom_path else "",
+            "go": module_dir(root, go_mod),
+            "python": module_dir(root, pyproject_path or requirements_path),
+            "node": module_dir(root, package_path),
+            "rust": module_dir(root, cargo_path),
+            "java": module_dir(root, pom_path or gradle_path),
+            "kotlin": module_dir(root, gradle_path or kotlin_path),
+            "flutter": module_dir(root, pubspec_path),
+            "dotnet": module_dir(root, csproj_path),
+            "php": module_dir(root, composer_path),
         },
         "test_frameworks": sorted(set(test_frameworks)),
         "bdd_tools": sorted(set(bdd_tools)),
-        "suggested_commands": commands,
+        "suggested_commands": [],
+        "candidate_adapters": candidate_adapters,
+        "command_policy": {
+            "broad_repository_runs_forbidden": True,
+            "exact_scenario_or_file_selector_required": True,
+        },
         "codegraph_available": (root / ".codegraph").exists(),
         "route_hints": scan_route_hints(root),
         "local_test_styles": scan_local_test_styles(root),
         "local_scripts": scan_local_scripts(root),
+        "middleware_config_hints": scan_middleware_config_hints(root),
     }
 
 

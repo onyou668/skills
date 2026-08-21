@@ -1,623 +1,315 @@
 # BDD/ATDD 验收工作流细节
 
+## 目录
+
+- 文件生命周期
+- acceptance intake 示例
+- Feature 示例
+- acceptance-map.yaml 契约
+- 测试生成协议
+- 语言与框架适配
+- 真实依赖与 context
+- 增量影响选择
+- 执行与防假绿
+- 失败报告与修复循环
+- 脚本命令
+
 ## 文件生命周期
 
-允许人工编辑：
+| 文件 | 编辑者 | 用途 |
+|---|---|---|
+| `acceptance.md` | 用户或 Agent | 自然语言输入、来源、草稿、待确认问题 |
+| `<unit>.feature` | 用户确认后由用户或 Agent 更新 | 唯一正式业务验收标准 |
+| `acceptance-map.yaml` | Agent + 脚本 | Feature、代码入口、测试文件、selector 和运行状态映射 |
+| 项目测试文件 | Agent，保护人工区域 | 真实集成/E2E 验收实现 |
+| `reports/latest.md` | runner + Agent | 增量结果、证据、诊断和修复建议 |
 
-```text
-acceptance.md
-config.yaml
-fixtures/*
-手写 helper 文件
-```
+Feature 变化后，保留原测试路径但标记 `generated_tests_stale: true`。生成并登记新测试后才清除 stale。
 
-不建议人工编辑：
+## acceptance intake 示例
 
-```text
-feature.feature
-bindings.yaml
-```
-
-禁止人工编辑或编辑后可能被覆盖：
-
-```text
-compiled/acceptance.normalized.yaml
-acceptance.lock.yaml
-reports/*
-generated/* 中的生成区域
-```
-
-## acceptance.md 示例
-
-```md
-# 登录模块验收文档
-
-## 元信息
-
-模块: login
-关联规范:
-- docs/auth/login.md
-
-关联代码:
-- internal/auth
-
-关联入口:
-- auto
+```markdown
+# login 验收输入
 
 ## 验收场景
 
-### AC-LOGIN-001 验证码必须为 6 位数字
+### AC-LOGIN-004 新增支持 QQ 和 163 邮箱登录
 
 状态: active
 来源: spoken
 优先级: must
 类型: auto
-标签: login, captcha, boundary
 
 Given:
-- 用户正在进行登录验证
+- 用户账号已存在并允许登录
 
 When:
-- 用户提交非 6 位验证码
+- 用户使用 QQ 或 163 邮箱登录
 
 Then:
-- 登录必须失败
-- 系统必须返回验证码长度错误
+- 邮箱支持范围校验通过
+- 登录继续执行后续密码校验
+- 不把合法邮箱返回为格式错误
 
 Data:
-- invalid_codes: ["", "12345", "1234567", "abcdef"]
-- valid_codes: ["123456"]
-
-Notes:
-- 错误码待确认
+- case_id=qq
+- case_id=163
 ```
 
-## 口头新增验收条件示例
+`acceptance.md` 可以保留未确认内容；只有完整且确认的场景进入 active Feature。
 
-用户可以说：
-
-```text
-给登录模块新增一个验收条件：
-用户输入错误密码时，登录失败，返回密码错误提示，并且不生成 token。
-```
-
-Skill 应先同步到 `acceptance.md`，然后输出 feature 预览和 `execution_plan_preview`。如果口头条件缺少关键期望，例如：
-
-```text
-连续多次错误密码后锁定账号
-```
-
-则必须标记为 `uncertain` 或 `pending`，并列出待确认问题：
-
-```text
-- 错误次数阈值是多少？
-- 锁定时长是多少？
-- 返回的业务 code / message_id 是什么？
-- 已锁定期间再次登录应该返回什么？
-```
-
-不要为这些值编造默认答案。
-
-## 验收文件校验与修正
-
-可以自动修正：
-
-```text
-标题层级
-字段顺序
-状态大小写
-类型写法
-Given/When/Then 格式
-空行和列表格式
-明显重复的标签格式
-```
-
-不能自动编造：
-
-```text
-业务期望值
-错误码
-金额
-次数
-时间窗口
-数据库字段
-第三方回调结果
-外部服务响应
-```
-
-缺少关键信息时，保留场景，但标记为 `pending` 或 `uncertain`，并说明原因。
-
-## Feature 预览示例
-
-Feature 必须是标准 Gherkin。默认使用英文关键字，步骤文本可中文；执行计划、JSON/YAML、测试函数名和命令不要混入 feature。
+## Feature 示例
 
 ```gherkin
-Feature: 登录模块验收
+Feature: login
 
-  Scenario: AC-LOGIN-001 验证码必须为 6 位数字
-    Given 用户正在进行登录验证
-    When 用户提交非 6 位验证码
-    Then 登录必须失败
-    And 系统必须返回验证码长度错误
+  @AC-LOGIN-004 @integration
+  Scenario Outline: 支持确认的邮箱域名登录
+    Given 用户账号已存在并允许登录
+    When 用户使用 <email> 登录
+    Then 邮箱支持范围校验应当通过
+    And 登录应当继续执行后续密码校验
+    And 不应返回邮箱格式错误
+
+    Examples:
+      | case_id | email          |
+      | qq      | user@qq.com    |
+      | 163     | user@163.com   |
 ```
 
-### Gherkin 质量规则
+每一行 Examples 是一个可追踪 Case。不要在 Feature 中写 handler、SQL、Redis key、mock 或命令。
 
-```text
-Feature 只写业务语义。
-Scenario 名称描述业务行为。
-Given 写业务前置状态。
-When 写用户动作或业务事件。
-Then 写可观察业务结果。
-步骤描述 WHAT，不描述 HOW。
-URL、JSON、SQL、函数名、mock、runner、命令必须放到 execution_plan_preview。
-pending / uncertain 应使用 tag 或 execution_plan_preview 表示，不能写成业务步骤。
-```
-
-不推荐：
-
-```gherkin
-Scenario: AC-LOGIN-001 错误密码
-  Given POST /api/login
-  When body.account="user@example.com" and body.password="bad"
-  Then AuthHandler.Login returns code 10001
-```
-
-推荐：
-
-```gherkin
-Scenario: AC-LOGIN-001 错误密码不能登录
-  Given 用户账号存在且可以登录
-  When 用户使用错误密码登录
-  Then 登录必须失败
-  And 系统不得生成登录 token
-```
-
-## Execution Plan Preview 示例
-
-执行计划必须来自当前代码只读发现，并且每个 case 都包含 `input / execute / assert`。
+## acceptance-map.yaml 契约
 
 ```yaml
-version: 1
-unit_id: client-auth-login
-plans:
-  - scenario_id: AC-CLIENT-AUTH-LOGIN-001
-    title: 邮箱登录只允许 Gmail 和 Outlook
-    scope: local
-    remote: false
-    validation_method:
-      type: go_handler_test
-      reason: 当前项目已有 Gin handler、httptest、sqlmock 测试风格；本场景验证本地登录逻辑，不请求远程 HTTP。
-    code_evidence:
-      - path: houduan/server/cmd/server/main.go
-        evidence: POST /api/auth/login -> AuthHandler.Login
-      - path: houduan/server/internal/handlers/auth_handler.go
-        evidence: unifiedLoginReq 包含 loginType/accountType/areaCode/account/password
-      - path: houduan/server/internal/handlers/auth_revocation_test.go
-        evidence: 已有 handlerJSONContext/newHandlerMockDB 测试 helper
-    case_coverage:
-      positive_required: true
-      negative_required: true
-      boundary_required: true
-      side_effect_required: true
-    atdd_quality_check:
-      invest:
-        testable: true
-      three_amigos_prompts:
-        business: 确认业务价值、成功结果和最终验收人
-        development: 确认本地入口、状态、数据、依赖和 fixture
-        testing: 确认失败路径、边界、副作用和回归风险
-    bdd_quality_check:
-      gherkin_validity:
-        has_given: true
-        has_when: true
-        has_then: true
-      declarative_language:
-        feature_should_describe_what_not_how: true
-    cases:
-      - id: invalid_format
-        dependency_resolution:
-          mysql:
-            required_by_assertion: false
-            context_config_found: may_exist
-            selected_mode: no_access_mock
-            reason: 本 case 验证早期拦截，后续用户查询和登录状态写入不应发生。
-          external_http:
-            required_by_assertion: false
-            selected_mode: fake_server_or_mock_transport
-            reason: 默认不调用真实第三方。
-        mock_contract:
-          required_when_using_mock_fake_or_stub: true
-          expected_contract_sources:
-            - DTO/struct/schema/interface
-            - 当前调用方实际读取的字段
-        input:
-          request:
-            content_type: application/json
-            json:
-              loginType: password
-              accountType: email
-              areaCode: "233"
-              account: abc
-              password: valid-password
-        execute:
-          mode: local_handler_call
-          local_code: AuthHandler.Login
-          setup:
-            db: sqlmock
-            external_services: fake_or_none
-        assert:
-          response:
-            http_status: 200
-            json:
-              code: 10001
-              message_id: error.auth.email_invalid
-              data: null
-          side_effects:
-            db_queries: none
-            db_writes: none
-            external_calls: none
-      - id: gmail_continue
-        dependency_resolution:
-          mysql:
-            required_by_assertion: true
-            context_config_found: check_context_or_project_test_config
-            selected_mode: real_test_if_safe_else_fake_or_pending
-            reason: 本 case 如需证明用户状态或 token 写入，必须使用安全的 local/test/sandbox 依赖或标记 pending。
-        input:
-          request:
-            content_type: application/json
-            json:
-              loginType: password
-              accountType: email
-              areaCode: "233"
-              account: user@gmail.com
-              password: valid-password
-        execute:
-          mode: local_handler_call
-          local_code: AuthHandler.Login
-          setup:
-            db: sqlmock
-        assert:
-          next_observable:
-            db_query:
-              table: users
-              where:
-                email: user@gmail.com
-          external_calls: none
-    generated_assets_preview:
-      - houduan/server/internal/handlers/auth_email_login_acceptance_test.go
-      - .acceptance/units/client-auth-login/bindings.yaml
-      - .acceptance/units/client-auth-login/compiled/bindings.json
-    command_preview:
-      - go test ./internal/handlers -run TestAcceptanceClientAuthLoginEmailDomain -count=1
-    execution_policy:
-      can_modify_business_code: false
-      run_after_second_confirm: true
-      batch_continue_on_failure: true
-```
+version: 2
+unit: login
+feature: login.feature
+canonical_source: feature
+mode: manual
 
-如果当前代码没有本地入口，不要伪造脚本或远程请求，标记 `pending` 并说明缺口。
+project:
+  languages:
+    - go
+  test_frameworks:
+    - go test
+  modules:
+    go: houduan/server
 
-## 语言候选工具
-
-Go：
-
-```text
-go test
-httptest
-godog
-go run
-CLI 执行
-worker/job 触发器
-```
-
-Python：
-
-```text
-pytest
-pytest-bdd
-behave
-httpx
-框架 test client
-subprocess
-```
-
-Node.js / TypeScript：
-
-```text
-jest
-vitest
-cucumber-js
-supertest
-playwright
-child_process
-```
-
-Java：
-
-```text
-JUnit
-Cucumber JVM
-RestAssured
-Maven/Gradle task
-```
-
-Rust：
-
-```text
-cargo test
-cucumber-rs
-assert_cmd
-HTTP test client
-```
-
-通用：
-
-```text
-Hurl
-Newman
-Bruno
-curl 包装脚本（仅用户明确要求远程或本地服务黑盒验收时）
-Shell / PowerShell
-数据库查询
-Redis 查询
-MQ 消息检查
-文件和日志断言
-```
-
-## bindings.yaml 示例
-
-```yaml
-version: 1
-unit_id: login
+execution_policy:
+  incremental_only: true
+  full_repository_run_forbidden_by_default: true
+  real_middleware_required_unless_context_allows_mock: true
+  production_code_fix_requires_confirmation: true
 
 scenarios:
-  AC-LOGIN-001:
-    selected_type: go_handler_test
-    execution_scope: local
-    remote: false
-    reason: 当前登录模块暴露 POST /api/login，但验收执行入口是本地 handler 测试，不请求远程 HTTP
-    alternatives:
-      - go_router_test
-      - go_unit_test
-      - godog
-    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength -count=1
-    runner: internal/auth/login_acceptance_test.go
-    plan_doc: generated/ac_login_001_acceptance_plan.md
-    execution_plan: compiled/execution_plan.preview.yaml
-    env:
-      APP_ENV: test
-    assertions:
-      - response.status == 400
-      - response.json.code == "CAPTCHA_LENGTH_INVALID"
+  - id: AC-LOGIN-004
+    status: active
+    selected: true
+    selection_reason: feature_added_or_changed
+    test_level: integration
+    case_ids:
+      - qq
+      - "163"
+
+    business_entrypoint:
+      type: http
+      method: POST
+      path: /api/auth/login
+    validation_entrypoint: AuthHandler.Login
+
+    style_evidence:
+      - file: houduan/server/internal/handlers/auth_handler_test.go
+        source: project_existing_test
+
+    dependency_resolution:
+      - name: mysql
+        mode: real
+        availability: available
+        evidence: docker-compose.test.yml
+      - name: redis
+        mode: real
+        availability: available
+        evidence: config/test.yaml
+
+    assertion_mapping:
+      - then: 邮箱支持范围校验应当通过
+        test_assertion: response business code is not email_invalid
+      - then: 不应返回邮箱格式错误
+        test_assertion: response error key differs from email_invalid
+
+    generated_tests:
+      - case_id: qq
+        file: houduan/server/internal/handlers/login_acceptance_test.go
+        symbol: TestAcceptanceLogin/AC-LOGIN-004/qq
+        language: go
+        framework: go-test
+        test_level: integration
+        discovery_command: cd houduan/server && go test ./internal/handlers -list TestAcceptanceLogin
+        command: cd houduan/server && go test -v ./internal/handlers -run "TestAcceptanceLogin/AC-LOGIN-004/qq" -count=1
+
+    generated_tests_stale: false
 ```
 
-如果原因说不清，不能生成验证逻辑，应标记为 `pending`。
+一个 Scenario 可以映射多个测试文件；一个测试文件也可以容纳多个 Scenario 的生成区域。映射必须精确到 Case 和 symbol。
 
-## acceptance.lock.yaml 示例
+## 测试生成协议
+
+生成前收集：
+
+```text
+Feature 场景与 Examples
+业务入口和本地 validation entrypoint
+同模块测试文件
+项目测试框架与 CI 命令
+fixture / helper / assertion / cleanup 风格
+真实中间件配置与可用性
+Git diff、符号和调用链影响范围
+```
+
+生成代码至少包含：
+
+```text
+Scenario / Case 稳定标识
+真实业务入口调用
+数据准备和隔离
+真实依赖或 context 明确授权的 mock
+每条 Then 的断言
+副作用与无副作用断言
+清理逻辑
+可精确发现和运行的测试 symbol
+```
+
+禁止创建不存在的项目 helper。需要公共 helper 时，先说明新增范围；只在用户确认后添加，并遵循项目风格。
+
+## 语言与框架适配
+
+| 技术栈 | 常见风格证据 | 精确执行候选 |
+|---|---|---|
+| Go/Gin/Echo | `_test.go`、table-driven、httptest、testcontainers | `go test <package> -run <scenario>` |
+| Python/FastAPI/Django | pytest fixture、TestClient、async marker | `pytest <file> -k <case>` |
+| Node/TypeScript | Jest/Vitest/Mocha、supertest、Playwright | 指定文件并使用 `-t` / testNamePattern |
+| Java/Kotlin/Spring | JUnit、MockMvc、Gradle/Maven、Testcontainers | `-Dtest=...` 或 Gradle `--tests` |
+| Rust/Axum/Actix | `tests/`、tokio test、cargo test target | `cargo test --test <target> <filter>` |
+| Flutter | `integration_test`、widget/integration 区分 | 指定 integration test 文件和设备 |
+| .NET | xUnit/NUnit/MSTest、WebApplicationFactory | `dotnet test --filter ...` |
+
+表格只是候选。必须先读当前项目。项目已有 BDD Runner 就复用；没有时不要为了 Feature 强制引入新框架。
+
+## 真实依赖与 context
+
+自由文本示例：
 
 ```yaml
-version: 1
-unit_id: login
-scenarios:
-  AC-LOGIN-001:
-    source_hash: abc123
-    generated_files:
-      - feature.feature
-      - bindings.yaml
-      - generated/login_acceptance_test.go
-    last_selected_type: http_api
+context: |
+  本项目验收连接本地 Docker 的 MySQL、Redis 和 Kafka。
+  全部走真实业务流程，不允许 mock。
 ```
-
-变更处理：
-
-```text
-只改标题/描述 => 输出 feature 预览，确认后通常不重建测试代码
-修改 Given/When/Then => 输出 feature 预览，确认后更新 bindings 和测试代码
-新增 Scenario => 输出新增 Scenario 预览，确认后生成验证逻辑
-废弃 Scenario => 输出废弃说明，确认后停止执行该场景
-修改 type => 输出执行方式变化说明，确认后重新选择验收方式
-修改 Data / fixture => 输出影响说明，确认后更新 fixture 和相关测试
-```
-
-## 异步断言
-
-异步副作用必须使用轮询，不要固定 sleep。
 
 ```yaml
-eventually:
-  timeout_seconds: 20
-  interval_ms: 500
-  assertions:
-    - db.orders.status == "expired"
-    - redis.order_state == "expired"
-    - mq.order_events contains "order.expired"
+context: |
+  MySQL 和 Redis 使用本地测试实例。
+  只有 Kafka 允许使用 fake。
 ```
 
-适用于脚本执行后数据库数字变化、worker 消费队列、定时任务执行、文件生成、日志输出、Redis 状态变化和外部回调模拟。
+第二个示例只授权 Kafka。不要把 Redis 或 MySQL 也改成 mock。
 
-## 外部 HTTP 调用逻辑
-
-验收外部 HTTP 调用逻辑时，默认验证当前代码的请求构造和响应处理，不请求真实第三方。
-
-```yaml
-external_http:
-  mode: fake_server
-  assert_request:
-    method: POST
-    path: /provider/send
-    headers:
-      Content-Type: application/json
-    json_contains:
-      to: user@example.com
-  fake_response:
-    status: 200
-    json:
-      ok: true
-  assert_local_result:
-    provider_status: submitted
-```
-
-## 脚本和统计报表验收
-
-统计脚本、修复脚本、批处理脚本默认在本地 test/sandbox fixture 中运行。判断 OK 不能只看 exit code，还要断言业务结果。
-
-```yaml
-input:
-  fixtures:
-    db:
-      orders:
-        - id: 1
-          status: paid
-          amount: 100
-  args:
-    - --date
-    - "2026-08-19"
-execute:
-  mode: local_script_or_runner
-  command_preview: go test ./internal/stats -run TestAcceptanceDailyReport -count=1
-assert:
-  process:
-    exit_code: 0
-    stdout_contains:
-      - paid_count=1
-  db_after:
-    daily_reports:
-      - report_date: "2026-08-19"
-        paid_count: 1
-  idempotency:
-    rerun: true
-    invariant: daily_reports for date has exactly one row
-```
-
-## 报告示例
-
-```yaml
-unit_id: login
-run_id: 2026-08-19T10-30-00
-status: fail
-acceptance_state: not_accepted
-summary:
-  pass: 3
-  fail: 1
-  skip: 0
-  pending: 0
-  uncertain: 1
-  error: 0
-  timeout: 0
-
-scenarios:
-  - id: AC-LOGIN-001
-    status: pass
-    acceptance_state: automated_pass
-    command: go test ./internal/auth -run TestAcceptanceLoginCaptchaLength
-
-  - id: AC-LOGIN-002
-    status: uncertain
-    acceptance_state: not_accepted
-    reason: 验收文件没有说明账号锁定持续时间
-    suggestion: 在 acceptance.md 中补充锁定持续时间和错误码
-```
-
-`acceptance_state` 表达业务验收语义：
+真实模式预检：
 
 ```text
-automated_pass   自动化验收通过，但不等于 PO 已签核
-manual_required  需要人工 Demo / PO 或业务确认
-not_accepted     未通过、未执行或仍有 pending/uncertain
+连接目标属于 local/test/sandbox
+健康检查成功
+测试身份和 namespace 唯一
+具备数据清理策略
+不会发送真实付费消息或访问生产资源
 ```
 
-## 内置脚本
+错误输入场景也使用真实流程。验证无副作用时比较执行前后状态；如果业务标准要求证明“没有访问”，使用查询审计、代理或可观测计数，不要替换成 no-access mock。
 
-本 Skill 包含：
+## 增量影响选择
+
+`acceptance-map.yaml` 是反向索引。Agent 将变更文件和符号映射到 business/validation entrypoint、共享依赖和测试文件。
+
+选择预览示例：
 
 ```text
-scripts/acceptance_detect.py
-scripts/acceptance_sync.py
-scripts/acceptance_compile.py
-scripts/acceptance_run.py
+baseline: main
+changed: internal/account/email_policy.go
+
+selected:
+- login / AC-LOGIN-004 / qq
+- login / AC-LOGIN-004 / 163
+
+not selected:
+- login / password scenarios
+- payment / all scenarios
+- profile / all scenarios
 ```
 
-脚本只能执行确定性操作，不能凭空创造业务期望。
+共享认证中间件变化可能选中多个 unit；这仍是影响范围，不是全量。无法确定时暂停，不允许用全量运行代替分析。
 
-### acceptance_detect.py
+## 执行与防假绿
 
-```bash
-python scripts/acceptance_detect.py --project-root . --pretty
-```
-
-用于识别：
+每个 generated test 必须有 scoped discovery command。执行顺序：
 
 ```text
-项目语言
-子模块路径
-包管理器
-测试框架
-BDD 工具
-config.context 是否存在
-可能的 HTTP 路由
-本地测试风格和 helper 线索
-本地脚本入口
-建议测试命令
+检查 map selected
+-> 检查文件和 stale
+-> 检查 context/middleware policy
+-> scoped discovery 证明 symbol 存在
+-> 执行 exact command
+-> 收集所有选中 Case
+-> 写 reports/latest.md
 ```
 
-### acceptance_sync.py
+裸 `pytest`、`npm test`、`mvn test`、`cargo test` 和 `go test ./...` 默认拒绝。用户明确要求全量时也应优先按 unit 分批，报告实际扩大范围。
 
-```bash
-python scripts/acceptance_sync.py --project-root . --unit login --criteria "验证码必须为 6 位数字" --source spoken
+## 失败报告与修复循环
+
+失败报告示例：
+
+```markdown
+### AC-LOGIN-004/qq
+
+- expected: qq.com 通过邮箱支持范围校验
+- actual: business code email_invalid
+- evidence: response body and real DB/Redis state
+- failure_type: business_code
+- call_chain: POST /api/auth/login -> AuthHandler.Login -> EmailPolicy.IsAllowed
+- abnormal_code: 当前允许域名集合缺少 qq.com
+- proposed_repair: 按已确认 Feature 更新允许集合，保留其他未确认域名为拒绝
+- planned_files: internal/account/email_policy.go
+- repair_state: awaiting_fix_confirmation
 ```
 
-用于：
+Agent 必须先检查测试、环境和数据是否正确，不能看到 fail 就改生产代码。用户确认后，授权范围仅限报告列出的场景和文件。每次修复记录 iteration、changed files、commands 和 result，直到 `incremental_pass` 或出现需要重新授权的阻塞。
 
-```text
-初始化 .acceptance
-创建或更新 units/<unit>/acceptance.md
-检查相似场景
-追加新的 AC 场景
-输出增量 feature 预览
+## 脚本命令
+
+```powershell
+# 收集口述条件
+python <skill>/scripts/acceptance_sync.py --project-root . --unit login --criteria "..." --source spoken
+
+# 手动模式预览；返回 2 表示等待确认
+python <skill>/scripts/acceptance_compile.py --project-root . --unit login
+
+# 用户确认后写正式 Feature 和模块映射
+python <skill>/scripts/acceptance_compile.py --project-root . --unit login --confirmed
+
+# 用户直接改 Feature 后校验与刷新
+python <skill>/scripts/acceptance_feature.py --project-root . --unit login --confirmed
+
+# Agent 生成真实测试后登记一个 Case
+python <skill>/scripts/acceptance_map.py --project-root . --unit login record-test `
+  --scenario AC-LOGIN-004 --case-id qq `
+  --file houduan/server/internal/handlers/login_acceptance_test.go `
+  --symbol "TestAcceptanceLogin/AC-LOGIN-004/qq" `
+  --language go --framework go-test --test-level integration `
+  --discovery-command "cd houduan/server && go test ./internal/handlers -list TestAcceptanceLogin" `
+  --command "cd houduan/server && go test -v ./internal/handlers -run TestAcceptanceLogin/AC-LOGIN-004/qq -count=1"
+
+# 用户确认执行后，只跑 selected Case
+python <skill>/scripts/acceptance_run.py --project-root . --unit login
 ```
 
-该脚本不会生成 `bindings.yaml`、测试代码或执行命令。
-
-### acceptance_compile.py
-
-```bash
-python scripts/acceptance_compile.py --project-root . --unit login --confirmed
-```
-
-未带 `--confirmed` 时用于输出 feature + execution_plan_preview，不写入执行资产。
-
-用于在用户确认 feature + execution_plan_preview 后生成：
-
-```text
-compiled/acceptance.normalized.yaml
-compiled/execution_plan.preview.yaml
-compiled/execution_plan.preview.json
-feature.feature
-bindings.yaml
-compiled/bindings.json
-acceptance.lock.yaml
-generated/*_acceptance_plan.md
-```
-
-该脚本会根据项目检测结果选择候选本地验收方式，写入建议的真实验收测试文件路径 `runner` 和计划文档 `plan_doc`。它不会编造业务断言、不会生成远程请求、不会修改业务代码。
-
-### acceptance_run.py
-
-```bash
-python scripts/acceptance_run.py --project-root . --unit login
-```
-
-用于读取 `compiled/bindings.json`，执行已绑定命令，并生成：
-
-```text
-reports/<run-id>.yaml
-reports/<run-id>.json
-reports/latest.yaml
-reports/latest.json
-```
-
-如果场景缺少命令或状态为 `pending`/`uncertain`，默认不会执行，也不会当作通过。
-
-如果 `runner` 指向的真实验收测试文件还不存在，默认标记为 `pending`，不会执行命令。批量执行时，单个场景失败、报错或超时不会中断后续场景；最终报告会统一统计 `pass/fail/skip/pending/uncertain/error/timeout`。只有整体状态为 `pass` 时返回 0，其他状态返回非 0。
+`--mode auto` 是本次调用的自动更新授权。`acceptance_run.py --all` 只允许在用户明确要求该 unit 全量验收时使用；仓库全量仍需额外明确授权。

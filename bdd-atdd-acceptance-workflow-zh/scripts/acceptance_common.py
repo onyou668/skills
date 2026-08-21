@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -57,8 +55,6 @@ VALID_TYPES = {
     "scheduled_job",
     "manual_review",
 }
-
-RUN_STATUSES = {"pass", "fail", "skip", "pending", "uncertain", "error", "timeout"}
 
 FIELD_ALIASES = {
     "状态": "status",
@@ -220,44 +216,13 @@ def ensure_base_files(project_root: Path, locale: str = "zh") -> Path:
     if not config.exists():
         write_text(
             config,
-            "version: 1\n"
+            "version: 2\n"
             "root: .acceptance\n\n"
-            "context: |\n\n"
-            "project:\n"
-            "  language: auto\n"
-            "  test_framework: auto\n"
-            "  package_manager: auto\n\n"
-            "defaults:\n"
-            "  feature_enabled: true\n"
-            "  generated_dir: generated\n"
-            "  fixture_dir: fixtures\n"
-            "  report_dir: reports\n\n"
-            "execution:\n"
-            "  env: test\n"
-            "  timeout_seconds: 120\n"
-            "  polling:\n"
-            "    interval_ms: 500\n"
-            "    timeout_seconds: 20\n",
+            "# Free-form project acceptance context. Keep empty until the user provides it.\n"
+            "context: |\n",
         )
-    index = root / "index.yaml"
-    if not index.exists():
-        write_text(index, "version: 1\nunits: []\n")
     (root / "units").mkdir(exist_ok=True)
     return root
-
-
-def update_index(root: Path, unit_id: str) -> None:
-    index = root / "index.yaml"
-    existing = read_text(index) if index.exists() else "version: 1\nunits: []\n"
-    if f"id: {unit_id}" in existing or f"- {unit_id}" in existing:
-        return
-    if "units: []" in existing:
-        updated = existing.replace("units: []", f"units:\n  - id: {unit_id}\n    path: units/{unit_id}")
-    else:
-        if not existing.endswith("\n"):
-            existing += "\n"
-        updated = existing + f"  - id: {unit_id}\n    path: units/{unit_id}\n"
-    write_text(index, updated)
 
 
 def unit_dir(project_root: Path, unit_id: str, locale: str = "zh") -> Path:
@@ -265,10 +230,16 @@ def unit_dir(project_root: Path, unit_id: str, locale: str = "zh") -> Path:
     safe_unit = slugify(unit_id, "unit")
     path = root / "units" / safe_unit
     path.mkdir(parents=True, exist_ok=True)
-    for child in ["compiled", "generated", "fixtures", "reports"]:
-        (path / child).mkdir(exist_ok=True)
-    update_index(root, safe_unit)
+    (path / "reports").mkdir(exist_ok=True)
     return path
+
+
+def feature_path(unit_path: Path, unit_id: str) -> Path:
+    return unit_path / f"{slugify(unit_id, 'unit')}.feature"
+
+
+def acceptance_map_path(unit_path: Path) -> Path:
+    return unit_path / "acceptance-map.yaml"
 
 
 def acceptance_template(unit_id: str, locale: str = "zh") -> str:
@@ -446,40 +417,190 @@ def scalar(value: Any) -> str:
     text = str(value)
     if not text:
         return '""'
+    if text.lower() in {"true", "false", "null", "~"} or re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return json.dumps(text, ensure_ascii=False)
     if re.fullmatch(r"[A-Za-z0-9_./:-]+", text):
         return text
     return json.dumps(text, ensure_ascii=False)
 
 
-def write_normalized_yaml(path: Path, unit_id: str, feature_title: str, scenarios: list[Scenario]) -> None:
-    lines = ["version: 1", f"unit_id: {scalar(unit_id)}", f"title: {scalar(feature_title)}", "scenarios:"]
-    for s in scenarios:
-        lines.extend(
-            [
-                f"  - id: {scalar(s.id)}",
-                f"    title: {scalar(s.title)}",
-                f"    status: {scalar(s.status)}",
-                f"    source: {scalar(s.source)}",
-                f"    priority: {scalar(s.priority)}",
-                f"    type: {scalar(s.type)}",
-                f"    source_hash: {s.source_hash()}",
-                "    given:",
-            ]
-        )
-        lines.extend(f"      - {scalar(item)}" for item in s.given)
-        lines.append("    when:")
-        lines.extend(f"      - {scalar(item)}" for item in s.when)
-        lines.append("    then:")
-        lines.extend(f"      - {scalar(item)}" for item in s.then)
-    write_text(path, "\n".join(lines) + "\n")
+def _yaml_lines(value: Any, indent: int = 0) -> list[str]:
+    prefix = " " * indent
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, (dict, list)) and item:
+                lines.append(f"{prefix}{key}:")
+                lines.extend(_yaml_lines(item, indent + 2))
+            elif isinstance(item, (dict, list)):
+                lines.append(f"{prefix}{key}: {json.dumps(item)}")
+            else:
+                lines.append(f"{prefix}{key}: {scalar(item)}")
+        return lines
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            if isinstance(item, (dict, list)) and item:
+                lines.append(f"{prefix}-")
+                lines.extend(_yaml_lines(item, indent + 2))
+            elif isinstance(item, (dict, list)):
+                lines.append(f"{prefix}- {json.dumps(item)}")
+            else:
+                lines.append(f"{prefix}- {scalar(item)}")
+        return lines
+    return [f"{prefix}{scalar(value)}"]
 
 
-def dump_json(path: Path, payload: Any) -> None:
-    write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+def write_yaml(path: Path, payload: Any) -> None:
+    """Write the constrained, dependency-free YAML subset used by this skill."""
+    write_text(path, "\n".join(_yaml_lines(payload)) + "\n")
 
 
-def load_json(path: Path) -> Any:
-    return json.loads(read_text(path))
+def _yaml_scalar(value: str) -> Any:
+    value = value.strip()
+    if not value:
+        return ""
+    if value in {"true", "false"}:
+        return value == "true"
+    if value in {"null", "~"}:
+        return None
+    if value.startswith(('"', "'", "[", "{")):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value.strip("\"'")
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    return value
+
+
+def load_yaml(path: Path) -> Any:
+    """Read the constrained YAML emitted by write_yaml without external packages."""
+    raw_lines: list[tuple[int, str]] = []
+    for raw in read_text(path).splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        raw_lines.append((indent, raw.strip()))
+    if not raw_lines:
+        return {}
+
+    def parse_block(index: int, indent: int) -> tuple[Any, int]:
+        is_list = raw_lines[index][1] == "-" or raw_lines[index][1].startswith("- ")
+        container: Any = [] if is_list else {}
+        while index < len(raw_lines):
+            current_indent, text = raw_lines[index]
+            if current_indent < indent:
+                break
+            if current_indent > indent:
+                raise ValueError(f"Invalid YAML indentation near: {text}")
+            if is_list:
+                if not (text == "-" or text.startswith("- ")):
+                    break
+                rest = text[1:].strip()
+                index += 1
+                if rest:
+                    container.append(_yaml_scalar(rest))
+                elif index < len(raw_lines) and raw_lines[index][0] > indent:
+                    child, index = parse_block(index, raw_lines[index][0])
+                    container.append(child)
+                else:
+                    container.append(None)
+                continue
+            if text == "-" or text.startswith("- "):
+                break
+            if ":" not in text:
+                raise ValueError(f"Invalid YAML mapping near: {text}")
+            key, rest = text.split(":", 1)
+            index += 1
+            if rest.strip():
+                container[key.strip()] = _yaml_scalar(rest)
+            elif index < len(raw_lines) and raw_lines[index][0] > indent:
+                child, index = parse_block(index, raw_lines[index][0])
+                container[key.strip()] = child
+            else:
+                container[key.strip()] = {}
+        return container, index
+
+    payload, consumed = parse_block(0, raw_lines[0][0])
+    if consumed != len(raw_lines):
+        raise ValueError(f"Could not parse YAML near: {raw_lines[consumed][1]}")
+    return payload
+
+
+def context_dependency_mode(context: str, dependency: str = "") -> str:
+    """Return mock only when free-form context explicitly authorizes it."""
+    text = (context or "").lower()
+    denied = [
+        "禁止 mock",
+        "禁止使用 mock",
+        "不允许 mock",
+        "不允许使用 mock",
+        "不得 mock",
+        "不得使用 mock",
+        "do not mock",
+        "without mock",
+        "no mocks",
+    ]
+    if any(phrase in text for phrase in denied):
+        return "real"
+
+    global_patterns = [
+        r"(?:全局|全部|所有|统一).{0,16}(?:mock|fake|stub|模拟)",
+        r"(?:mock|fake|stub|模拟).{0,16}(?:全局|全部|所有|统一)",
+        r"(?:global|all).{0,16}(?:mock|fake|stub)",
+        r"(?:mock|fake|stub).{0,16}(?:global|all)",
+        r"mock\s+mode",
+    ]
+    if any(re.search(pattern, text, re.I) for pattern in global_patterns):
+        return "mock"
+
+    dependency = dependency.lower().strip()
+    if dependency:
+        for sentence in re.split(r"[。！？.!?;；\n]+", text):
+            if dependency in sentence and re.search(r"mock|fake|stub|模拟", sentence, re.I):
+                if not any(phrase in sentence for phrase in denied):
+                    return "mock"
+    return "real"
+
+
+def command_is_broad_test_run(command: str) -> bool:
+    """Detect repository-wide commands that incremental acceptance must reject."""
+    normalized = re.sub(r"\s+", " ", (command or "").strip().lower())
+    if not normalized:
+        return False
+    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", normalized):
+        go_test = re.search(r"\bgo test\b(.*)$", segment)
+        if go_test:
+            tail = go_test.group(1)
+            if re.search(r"\./\.\.\.(?:\s|$)", tail) or ("-run" not in tail and "-list" not in tail):
+                return True
+        pytest = re.search(r"(?:^|\s)(?:python(?:\.exe)?\s+-m\s+)?pytest\b(.*)$", segment)
+        if pytest:
+            tail = pytest.group(1)
+            scoped_file = re.search(r"(?:^|\s)[\"']?[^\s\"']+[\\/][^\s\"']+|(?:^|\s)[\"']?[^\s\"']+\.py(?:[\"']?)(?:\s|$)", tail)
+            if not scoped_file:
+                return True
+        node_test = re.search(r"(?:^|\s)(?:npm(?: run)?|pnpm|yarn) test\b(.*)$", segment)
+        if node_test:
+            tail = node_test.group(1)
+            scoped_file = re.search(r"(?:^|\s)[\"']?[^\s\"']+[\\/][^\s\"']+|(?:^|\s)[\"']?[^\s\"']+\.(?:js|jsx|ts|tsx|mjs|cjs)(?:[\"']?)(?:\s|$)", tail)
+            if not scoped_file:
+                return True
+        if re.search(r"(?:^|\s)mvn(?:\s+-[^\s]+)*\s+test(?:\s|$)", segment) and not re.search(r"-dtest=", segment):
+            return True
+        cargo = re.search(r"(?:^|\s)cargo test\b(.*)$", segment)
+        if cargo:
+            tail = cargo.group(1).strip()
+            if not tail or not (re.search(r"(?:^|\s)--test\s+\S+", tail) or re.search(r"(?:^|\s)(?!-)\S+", tail)):
+                return True
+        if re.search(r"(?:gradlew|gradlew\.bat|\./gradlew)\b.*(?:^|\s)(?:\S+:)?test(?:\s|$)", segment) and "--tests" not in segment:
+            return True
+        if re.search(r"(?:^|\s)dotnet test(?:\s|$)", segment) and "--filter" not in segment:
+            return True
+    return False
 
 
 def run_command(command: str, cwd: Path, timeout: int = 120) -> dict[str, Any]:
@@ -526,9 +647,3 @@ def command_is_dangerous(command: str) -> bool:
         "rmdir /s",
     ]
     return any(item in lowered for item in forbidden)
-
-
-def shell_quote(value: str) -> str:
-    if os.name == "nt":
-        return subprocess.list2cmdline([value])
-    return shlex.quote(value)

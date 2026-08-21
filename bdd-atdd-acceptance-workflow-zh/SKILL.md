@@ -26,11 +26,13 @@ Feature 变更预览与确认
              ↓
 真实验收测试代码 + acceptance-map.yaml
              ↓
-只执行受影响 Scenario / Case
+创建 acceptance_id；一次运行创建 RUN-xxx
              ↓
-reports/latest.md
+一轮可执行多个受影响 unit / Scenario / Case
              ↓
-失败诊断 → 修复方案 → 用户确认 → 修复并持续验收到通过
+运行总报告 → 各模块不可变报告 → latest.md 指针
+             ↓
+失败诊断 → 修复确认 → 同一验收新增运行 → 最终 accepted
 ```
 
 `acceptance.md` 不是正式标准。Feature 确认后，测试生成、执行和失败判断只以 Feature 为准。代码只用于发现怎样验证，不能反向决定业务期望。
@@ -42,6 +44,12 @@ reports/latest.md
 ```text
 .acceptance/
   config.yaml
+  acceptances/
+    <acceptance-id>/
+      report.md
+      runs/
+        RUN-001.md
+        RUN-002.md
   units/
     <unit-id>/
       acceptance.md
@@ -49,10 +57,26 @@ reports/latest.md
       acceptance-map.yaml
       reports/
         latest.md
-        history/                 # 仅在需要保留历史时创建
+        <acceptance-id>-<run-id>.md
 ```
 
 测试代码必须放入当前项目真实测试目录，不要藏在 `.acceptance`。不要生成 `compiled/`、`bindings.yaml`、lock、normalized、逐场景 plan Markdown 等重复产物。
+
+## 验收与运行身份
+
+用户每次新发起验收时创建唯一 `acceptance_id`。一次验收可以覆盖多个模块，并包含多次实际运行：
+
+```text
+Acceptance  一次完整验收闭环
+Run         一次实际执行；同一验收内使用 RUN-001、RUN-002...
+Unit        本轮实际选择的业务模块
+Scenario    Feature 中的业务行为
+Case        Examples 中的具体输入行
+```
+
+首次运行、失败诊断、确认修复和后续重跑共享同一 `acceptance_id`，每次执行新增 `run_id`。验收已经 `accepted` 后再次发起验证，或新增独立业务需求时创建新的 `acceptance_id`。
+
+运行报告和模块报告生成后不可覆盖。`latest.md` 只保存最近模块报告、运行报告和验收总报告的相对路径；失败历史使用 `superseded_by` 关联后续运行，不得自动删除。
 
 需要生成或执行资产时，阅读 [references/workflow-details.md](references/workflow-details.md)。
 
@@ -106,6 +130,8 @@ async / timeout / retry / rollback / external-dependency
 
 用户明确要求 `auto` 后，Agent 可以自行确认并增量更新 acceptance、Feature、测试代码和映射。执行验收需要用户同时明确授权执行，或明确说“全自动更新并执行”。
 
+auto 不包含修复授权。已有失败运行时，只有用户确认诊断和修复范围后，才能在同一 `acceptance_id` 下创建下一次 Run。
+
 即使 auto 模式，以下情况也必须退回人工确认：需求不明确、Feature 冲突、影响范围无法确定、新依赖、数据库迁移、生产资源、真实支付/短信/邮件、收费 API、不可逆操作或修复范围扩大。
 
 ## 影响分析与增量选择
@@ -133,6 +159,8 @@ Case 映射明确      -> 只选该 Case
 ```
 
 未受影响内容是 `not_selected`，不是 skip。禁止默认运行 `go test ./...`、裸 `pytest`、`npm test`、`mvn test`、`cargo test` 等全仓命令。只有用户明确要求模块或项目全量验收时才允许扩大范围。
+
+修复后必须重新计算影响范围。旧 pass 对应的 Feature 变化、测试 stale，或其模块因共享代码再次被选中时，该结果变为 stale；不得把不同代码状态下的通过结果直接拼成整体验收通过。
 
 ## 项目风格与语言适配
 
@@ -181,6 +209,7 @@ test_file / test_symbol
 exact command / discovery command
 Then -> assertion mapping
 selected / selection_reason / stale
+contract_revision / latest_acceptance_id / latest_run_id / latest_report
 ```
 
 生成代码使用 Scenario ID 标记，只覆盖明确生成区域；复用并保护人工 helper、fixture 和测试逻辑。
@@ -196,10 +225,11 @@ selected / selection_reason / stale
 5. mock 使用得到 context 明确授权。
 6. 真实依赖可用并完成隔离。
 7. 每条 Then 都有断言。
+8. acceptance_id、run_id、Feature/map/context 指纹和代码状态已记录。
 
 命令退出 0 但没有发现或执行测试时必须记 pending，不能记 pass。单个 Case 失败或超时不得中断同批其他选中 Case。
 
-只有所有选中 Case 通过时报告 `incremental_pass`；这不等于全项目验收通过。
+只有本轮所有选中 Case 通过时，Run 才是 `incremental_pass`。只有本次验收范围内所有模块对当前 Feature 和影响分析都有有效 pass 时，Acceptance 才是 `accepted`。
 
 ## 失败诊断与修复闭环
 
@@ -209,7 +239,7 @@ selected / selection_reason / stale
 
 报告完成后停在 `awaiting_fix_confirmation`。未经确认不得修改生产代码。
 
-用户确认“修复并继续验收”后，只在报告列出的范围内修复；不得修改 Feature 迎合实现。每轮修复后重新计算影响范围并执行受影响验收，持续到通过。根因变化、范围扩大、新依赖、迁移或危险操作必须重新确认。
+用户确认“修复并继续验收”后，只在报告列出的范围内修复；不得修改 Feature 迎合实现。每轮修复后重新计算影响范围，在同一 `acceptance_id` 下新增 Run 并执行受影响验收，持续到通过。根因变化、范围扩大、新依赖、迁移或危险操作必须重新确认。
 
 ## 安全边界
 
@@ -225,7 +255,7 @@ acceptance_sync.py     文档/口述条件进入 acceptance.md intake
 acceptance_compile.py  Feature 与生成预览；确认后写正式 Feature 和模块映射
 acceptance_feature.py  校验直接编辑的 Feature 并刷新受影响映射
 acceptance_map.py      登记真实测试路径、symbol、selector 和增量选择
-acceptance_run.py      只执行 selected Case，写模块 reports/latest.md
+acceptance_run.py      一次运行多个 unit，维护 Acceptance/Run/模块报告和 latest 指针
 ```
 
 优先运行脚本完成确定性操作；测试代码仍由 Agent 根据当前项目真实代码与风格生成。
@@ -234,4 +264,6 @@ acceptance_run.py      只执行 selected Case，写模块 reports/latest.md
 
 一个场景只有在以下条件全部满足时才算接受：Feature 已确认、所有边界 Case 已映射、测试真实存在且可发现、依赖策略合规、所有 Then 有断言、受影响 Case 全部通过且报告有可复核证据。
 
-最终回复必须明确：更新的 unit 和 Feature、受影响与未选择范围、生成的测试文件/符号、真实依赖模式、执行命令、结果证据、失败诊断、是否等待修复确认，以及本次只能声称增量通过还是完整模块通过。
+整次验收只有在验收范围内每个模块的最新有效结果都对应当前 Feature、当前 map 和最终影响分析，并且不存在 fail、pending、uncertain、error、timeout 或 stale 时，才能标记 `accepted`。
+
+最终回复必须明确：acceptance_id、run_id、更新的 unit 和 Feature、受影响与未选择范围、各级报告路径、生成的测试文件/符号、真实依赖模式、执行命令、结果证据、失败诊断、是否等待修复确认，以及本轮是 incremental_pass 还是整次验收 accepted。

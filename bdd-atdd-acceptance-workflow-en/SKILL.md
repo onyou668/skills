@@ -26,11 +26,13 @@ Code impact, project test style, entrypoint, and dependency discovery
                           ↓
 Executable acceptance tests + acceptance-map.yaml
                           ↓
-Run only affected Scenarios / Cases
+Create acceptance_id; create RUN-xxx for each execution
                           ↓
-reports/latest.md
+Run one or more affected units / Scenarios / Cases
                           ↓
-Failure diagnosis -> repair proposal -> user approval -> repair and rerun until pass
+Run report -> immutable module reports -> latest.md pointers
+                          ↓
+Failure diagnosis -> repair approval -> another Run in the same Acceptance -> accepted
 ```
 
 `acceptance.md` is not the canonical contract. After Feature approval, test generation, execution, and failure decisions use the Feature only. Code reveals how to validate; it never defines the expected business result.
@@ -42,6 +44,12 @@ Each unit represents a business module, API, workflow, CLI, worker, or scheduled
 ```text
 .acceptance/
   config.yaml
+  acceptances/
+    <acceptance-id>/
+      report.md
+      runs/
+        RUN-001.md
+        RUN-002.md
   units/
     <unit-id>/
       acceptance.md
@@ -49,10 +57,26 @@ Each unit represents a business module, API, workflow, CLI, worker, or scheduled
       acceptance-map.yaml
       reports/
         latest.md
-        history/                 # create only when history is requested
+        <acceptance-id>-<run-id>.md
 ```
 
 Executable test code belongs in the repository's real test directories, not under `.acceptance`. Do not generate redundant `compiled/`, bindings, lock, normalized, or per-scenario plan documents.
+
+## Acceptance and Run Identity
+
+Create one unique `acceptance_id` whenever the user starts a new acceptance. One Acceptance may cover multiple modules and contain multiple actual Runs:
+
+```text
+Acceptance  one complete acceptance lifecycle
+Run         one execution, numbered RUN-001, RUN-002... inside the Acceptance
+Unit        a business module selected in this Run
+Scenario    a business behavior in the Feature
+Case        one concrete Examples row
+```
+
+The first Run, failure diagnosis, approved repair, and later reruns share the same `acceptance_id`; every execution gets a new `run_id`. Start a new Acceptance after the current one is `accepted`, or when a separate business requirement is introduced.
+
+Never overwrite completed Run or module reports. `latest.md` contains only relative pointers to the latest module report, its Run report, and the Acceptance report. Link failed history with `superseded_by`; never delete it automatically after success.
 
 Read [references/workflow-details.md](references/workflow-details.md) when generating or executing assets.
 
@@ -107,6 +131,8 @@ Detect acceptance impact automatically
 
 After the user explicitly requests `auto`, the agent may self-approve incremental acceptance, Feature, test-code, and map updates. Execution still needs explicit authorization, unless the user explicitly requests fully automatic update and execution.
 
+Auto mode does not authorize repairs. After a failed Run, create another Run in the same `acceptance_id` only after the user confirms the diagnosis and repair scope.
+
 Even in auto mode, return to manual approval for ambiguity, Feature conflict, uncertain impact, new dependencies, migrations, production resources, real payment/SMS/email, paid APIs, irreversible operations, or expanded repair scope.
 
 ## Impact Analysis and Incremental Selection
@@ -134,6 +160,8 @@ Impact is uncertain         -> mark uncertain and ask; never fall back to full r
 ```
 
 Unaffected content is `not_selected`, not skipped. Reject repository-wide defaults such as `go test ./...`, bare `pytest`, `npm test`, `mvn test`, and `cargo test`. Expand to a whole unit or repository only after the user explicitly requests it.
+
+Recompute impact after every repair. A prior pass becomes stale when its Feature changes, its tests are stale, or shared-code impact selects that module again. Never combine passes from incompatible code states into an accepted result.
 
 ## Project Style and Language Adapters
 
@@ -182,6 +210,7 @@ test_file / test_symbol
 exact command / discovery command
 Then -> assertion mapping
 selected / selection_reason / stale
+contract_revision / latest_acceptance_id / latest_run_id / latest_report
 ```
 
 Mark generated regions with Scenario IDs. Update only those regions; preserve manual helpers, fixtures, and test logic.
@@ -197,10 +226,11 @@ Before execution, prove:
 5. Context explicitly authorizes every mock.
 6. Real dependencies are available and isolated.
 7. Every Then has an assertion.
+8. acceptance_id, run_id, Feature/map/context fingerprints, and code state are recorded.
 
 Exit code 0 with no discovered or executed test is pending, never pass. One failed or timed-out Case must not stop other selected Cases.
 
-Report `incremental_pass` only when every selected Case passes. This does not mean the whole repository passed acceptance.
+Report Run `incremental_pass` only when every selected Case in that Run passes. Report Acceptance `accepted` only when every module in its scope has a valid pass for the current Feature and final impact analysis.
 
 ## Failure Diagnosis and Repair Loop
 
@@ -210,7 +240,7 @@ The report includes the Feature expectation, actual evidence, route-to-symbol ca
 
 Stop at `awaiting_fix_confirmation`. Do not modify production code before approval.
 
-After the user confirms repair and continued acceptance, repair only the reported scope and never change the Feature to fit implementation. Recompute impact and rerun affected acceptance after each iteration until pass. Reconfirm when the root cause changes, scope expands, or work needs a dependency, migration, or dangerous operation.
+After the user confirms repair and continued acceptance, repair only the reported scope and never change the Feature to fit implementation. Recompute impact, create another Run under the same `acceptance_id`, and rerun affected acceptance until pass. Reconfirm when the root cause changes, scope expands, or work needs a dependency, migration, or dangerous operation.
 
 ## Safety Boundary
 
@@ -226,7 +256,7 @@ acceptance_sync.py     Document/spoken criteria into the acceptance.md intake
 acceptance_compile.py  Feature and generation preview; confirmed canonical Feature and module map
 acceptance_feature.py  Validate direct Feature edits and refresh affected mappings
 acceptance_map.py      Record test paths, symbols, selectors, and incremental selection
-acceptance_run.py      Run selected Cases only and write module reports/latest.md
+acceptance_run.py      Run one or more units and maintain Acceptance, Run, module, and latest reports
 ```
 
 Prefer scripts for deterministic operations. The agent still generates test code from the repository's real code and conventions.
@@ -235,4 +265,6 @@ Prefer scripts for deterministic operations. The agent still generates test code
 
 A Scenario is accepted only when its Feature is approved, every boundary Case is mapped, tests exist and are discoverable, dependency policy is compliant, every Then is asserted, all affected Cases pass, and the report contains reviewable evidence.
 
-The final response states the updated unit and Feature, affected and not-selected scope, generated files/symbols, real dependency mode, exact commands, evidence, failure diagnosis, whether repair approval is pending, and whether the result proves only an incremental pass or a complete unit pass.
+Mark the whole Acceptance `accepted` only when every module in scope has a current result for the active Feature, map, and final impact analysis, with no fail, pending, uncertain, error, timeout, or stale state.
+
+The final response names acceptance_id, run_id, updated units and Features, affected and not-selected scope, all report paths, generated files/symbols, real dependency mode, exact commands, evidence, failure diagnosis, repair-approval state, and whether this Run was incremental_pass or the whole Acceptance is accepted.

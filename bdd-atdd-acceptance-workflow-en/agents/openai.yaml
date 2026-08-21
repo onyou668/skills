@@ -1,7 +1,7 @@
 interface:
   display_name: "BDD/ATDD Acceptance Workflow"
-  short_description: "Feature-driven incremental integration and E2E acceptance"
-  default_prompt: "Use $bdd-atdd-acceptance-workflow-en to turn my documents, spoken criteria, or Feature edits into executable incremental BDD/ATDD acceptance."
+  short_description: "Feature-driven multi-unit, multi-run integration and E2E acceptance"
+  default_prompt: "Use $bdd-atdd-acceptance-workflow-en to maintain one traceable multi-unit acceptance, execute incremental Runs, and continue after confirmed fixes until it passes."
 
 policy:
   allow_implicit_invocation: true

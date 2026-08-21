@@ -106,13 +106,6 @@ def case_ids(scenario: Scenario) -> list[str]:
     return found or ["case-001"]
 
 
-def existing_scenarios(path: Path) -> dict[str, dict]:
-    if not path.exists():
-        return {}
-    payload = load_yaml(path)
-    return {item.get("id", ""): item for item in payload.get("scenarios", []) if item.get("id")}
-
-
 def feature_scenario(payload: dict) -> Scenario:
     return Scenario(
         id=payload["id"],
@@ -147,7 +140,7 @@ def merged_dependencies(previous: list[dict], detected: list[dict]) -> list[dict
     return list(merged.values())
 
 
-def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: list[Scenario], feature_scenarios: dict[str, dict], detection: dict, context: str, mode: str, existing: dict[str, dict], intake_hashes: dict[str, str]) -> dict:
+def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: list[Scenario], feature_scenarios: dict[str, dict], detection: dict, context: str, mode: str, existing: dict[str, dict], intake_hashes: dict[str, str], contract_revision: int) -> dict:
     project_style = style_evidence(detection)
     mapped = []
     for scenario in scenarios:
@@ -159,8 +152,7 @@ def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: li
         pending_assertions = [{"then": item, "test_assertion": "pending_generation"} for item in scenario.then]
         assertions = pending_assertions if changed else previous.get("assertion_mapping", pending_assertions)
         dependencies = merged_dependencies(previous.get("dependency_resolution", []), detect_dependencies(scenario, context))
-        mapped.append(
-            {
+        item = {
                 "id": scenario.id,
                 "title": scenario.title,
                 "status": scenario.status,
@@ -179,12 +171,15 @@ def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: li
                 "generated_tests_stale": bool(previous.get("generated_tests_stale") or (changed and generated_tests)),
                 "repair_state": previous.get("repair_state", "not_required"),
             }
-        )
+        if changed and previous:
+            item["latest_result"] = "stale"
+        mapped.append(item)
     return {
-        "version": 2,
+        "version": 3,
         "unit": unit_id,
         "feature": feature_file.name,
         "feature_hash": hash_text(feature_text),
+        "contract_revision": contract_revision,
         "canonical_source": "feature",
         "intake_source": "acceptance.md",
         "mode": mode,
@@ -200,6 +195,8 @@ def build_map(unit_id: str, feature_file: Path, feature_text: str, scenarios: li
             "full_repository_run_forbidden_by_default": True,
             "real_middleware_required_unless_context_allows_mock": True,
             "production_code_fix_requires_confirmation": True,
+            "multi_unit_acceptance_supported": True,
+            "immutable_run_reports": True,
         },
         "scenarios": mapped,
     }
@@ -253,7 +250,8 @@ def main() -> int:
     active = [scenario for scenario in scenarios if active_for_feature(scenario)]
     target_feature = feature_path(unit_path, unit_id)
     target_map = acceptance_map_path(unit_path)
-    existing = existing_scenarios(target_map)
+    existing_payload = load_yaml(target_map) if target_map.exists() else {}
+    existing = {item.get("id", ""): item for item in existing_payload.get("scenarios", []) if item.get("id")}
     existing_text = target_feature.read_text(encoding="utf-8") if target_feature.exists() else ""
     existing_feature_scenarios: list[dict] = []
     if existing_text:
@@ -304,7 +302,12 @@ def main() -> int:
     parsed_by_id = {scenario["id"]: scenario for scenario in parsed_feature_scenarios}
     canonical_scenarios = [feature_scenario(item) for item in parsed_feature_scenarios]
     intake_hashes = {scenario.id: scenario.source_hash() for scenario in active}
-    mapping = build_map(unit_id, target_feature, merged_feature, canonical_scenarios, parsed_by_id, detection, context, args.mode, existing, intake_hashes)
+    new_feature_hash = hash_text(merged_feature)
+    previous_revision = int(existing_payload.get("contract_revision", 0) or 0)
+    contract_revision = previous_revision or 1
+    if previous_revision and existing_payload.get("feature_hash") != new_feature_hash:
+        contract_revision += 1
+    mapping = build_map(unit_id, target_feature, merged_feature, canonical_scenarios, parsed_by_id, detection, context, args.mode, existing, intake_hashes, contract_revision)
     write_text(target_feature, merged_feature)
     write_yaml(target_map, mapping)
     print("Updated canonical acceptance assets:")

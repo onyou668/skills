@@ -19,6 +19,7 @@ from acceptance_common import (  # noqa: E402
 )
 from acceptance_detect import detect  # noqa: E402
 from acceptance_feature import parse_feature  # noqa: E402
+from acceptance_run import parse_frontmatter  # noqa: E402
 
 
 def run_script(name: str, *args: str) -> subprocess.CompletedProcess:
@@ -29,6 +30,12 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def detailed_report_from_latest(unit: Path) -> tuple[dict, Path]:
+    latest = unit / "reports" / "latest.md"
+    metadata = parse_frontmatter(latest)
+    return metadata, (latest.parent / metadata["module_report"]).resolve()
 
 
 class AcceptanceWorkflowV2Tests(unittest.TestCase):
@@ -140,6 +147,8 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
             self.assertFalse((unit / "compiled").exists())
             self.assertFalse((unit / "bindings.yaml").exists())
             mapping = load_yaml(unit / "acceptance-map.yaml")
+            self.assertEqual(mapping["version"], 3)
+            self.assertEqual(mapping["contract_revision"], 1)
             self.assertEqual(mapping["canonical_source"], "feature")
             self.assertTrue(mapping["scenarios"][0]["selected"])
             self.assertTrue(mapping["scenarios"][0]["intake_hash"])
@@ -170,6 +179,7 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
             write_text(feature, direct)
             result = run_script("acceptance_feature.py", "--project-root", str(project), "--unit", "login", "--confirmed")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(load_yaml(unit / "acceptance-map.yaml")["contract_revision"], 2)
 
             with acceptance.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(
@@ -182,6 +192,7 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
             self.assertIn("AC-LOGIN-001", canonical)
             self.assertIn("AC-LOGIN-002", canonical)
             self.assertIn("AC-LOGIN-003", canonical)
+            self.assertEqual(load_yaml(unit / "acceptance-map.yaml")["contract_revision"], 3)
 
             changed_intake = acceptance.read_text(encoding="utf-8").replace("- 登录成功", "- 登录成功并记录时间")
             write_text(acceptance, changed_intake)
@@ -228,7 +239,8 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
             write_yaml(map_path, mapping)
             result = run_script("acceptance_run.py", "--project-root", str(project), "--unit", "login")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            report = (unit / "reports" / "latest.md").read_text(encoding="utf-8")
+            _, report_path = detailed_report_from_latest(unit)
+            report = report_path.read_text(encoding="utf-8")
             self.assertIn("163", report)
 
             mapping["scenarios"][0]["generated_tests"].append(
@@ -244,7 +256,8 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
             write_yaml(map_path, mapping)
             result = run_script("acceptance_run.py", "--project-root", str(project), "--unit", "login")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            report = (unit / "reports" / "latest.md").read_text(encoding="utf-8")
+            _, report_path = detailed_report_from_latest(unit)
+            report = report_path.read_text(encoding="utf-8")
             self.assertIn("Not every Then", report)
 
             mapping["scenarios"][0]["assertion_mapping"][0]["test_assertion"] = "assert response success"
@@ -324,9 +337,163 @@ class AcceptanceWorkflowV2Tests(unittest.TestCase):
                 "login",
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            report = (project / ".acceptance" / "units" / "login" / "reports" / "latest.md").read_text(encoding="utf-8")
-            self.assertIn("incremental_pass", report)
+            latest, report_path = detailed_report_from_latest(project / ".acceptance" / "units" / "login")
+            report = report_path.read_text(encoding="utf-8")
+            self.assertEqual(latest["status"], "incremental_pass")
+            self.assertEqual(latest["acceptance_status"], "accepted")
             self.assertIn("AC-LOGIN-001/case-001", report)
+
+    def test_multi_unit_acceptance_keeps_failed_runs_and_requires_stale_units_to_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            tests_dir = project / "tests"
+            discovery = tests_dir / "discover.py"
+            login_test = tests_dir / "login_acceptance.py"
+            account_test = tests_dir / "account_acceptance.py"
+            account_pass = project / "account-pass"
+            write_text(discovery, 'print("case_login case_account")\n')
+            write_text(login_test, 'print("case_login token=login-secret")\n')
+            write_text(
+                account_test,
+                "from pathlib import Path\nimport sys\n"
+                'print("case_account token=account-secret postgres://tester:db-secret@localhost/test")\n'
+                f"sys.exit(0 if Path({str(account_pass)!r}).exists() else 1)\n",
+            )
+            discovery_command = subprocess.list2cmdline([sys.executable, str(discovery)])
+
+            def create_unit(unit_id: str, scenario_id: str, case_id: str, test_file: Path, feature_hash: str) -> Path:
+                unit = unit_dir(project, unit_id)
+                mapping = {
+                    "version": 3,
+                    "unit": unit_id,
+                    "feature_hash": feature_hash,
+                    "contract_revision": 1,
+                    "scenarios": [
+                        {
+                            "id": scenario_id,
+                            "status": "active",
+                            "selected": True,
+                            "selection_reason": "affected_by_current_change",
+                            "case_ids": [case_id],
+                            "business_entrypoint": f"{unit_id} behavior",
+                            "validation_entrypoint": test_file.stem,
+                            "style_evidence": [{"file": str(test_file.relative_to(project)).replace('\\', '/')}],
+                            "assertion_mapping": [{"then": f"{unit_id} accepted", "test_assertion": "assert process exit"}],
+                            "generated_tests_stale": False,
+                            "generated_tests": [
+                                {
+                                    "case_id": case_id,
+                                    "file": str(test_file.relative_to(project)).replace('\\', '/'),
+                                    "symbol": case_id,
+                                    "command": subprocess.list2cmdline([sys.executable, str(test_file)]),
+                                    "discovery_command": discovery_command,
+                                }
+                            ],
+                        }
+                    ],
+                }
+                write_yaml(unit / "acceptance-map.yaml", mapping)
+                return unit
+
+            login = create_unit("login", "AC-LOGIN-001", "case_login", login_test, "feature-login-v1")
+            account = create_unit("account", "AC-ACCOUNT-001", "case_account", account_test, "feature-account-v1")
+            acceptance_id = "ACC-TEST-MULTI-001"
+            result = run_script(
+                "acceptance_run.py",
+                "--project-root",
+                str(project),
+                "--unit",
+                "login",
+                "--unit",
+                "account",
+                "--acceptance-id",
+                acceptance_id,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            acceptance_report = project / ".acceptance" / "acceptances" / acceptance_id / "report.md"
+            first_acceptance = parse_frontmatter(acceptance_report)
+            self.assertEqual(first_acceptance["status"], "awaiting_diagnosis")
+            self.assertEqual(first_acceptance["scope_units"], ["login", "account"])
+            run_one = acceptance_report.parent / "runs" / "RUN-001.md"
+            self.assertTrue(run_one.is_file())
+            run_one_metadata = parse_frontmatter(run_one)
+            self.assertEqual(len(run_one_metadata["modules"]), 2)
+            self.assertTrue(run_one_metadata["context_fingerprint"])
+            self.assertTrue(all(item["map_hash"] for item in run_one_metadata["modules"]))
+            _, failed_account_report = detailed_report_from_latest(account)
+            self.assertIn("[REDACTED]", failed_account_report.read_text(encoding="utf-8"))
+            self.assertNotIn("account-secret", failed_account_report.read_text(encoding="utf-8"))
+            self.assertNotIn("db-secret", failed_account_report.read_text(encoding="utf-8"))
+
+            login_map = load_yaml(login / "acceptance-map.yaml")
+            login_map["scenarios"][0]["selected"] = True
+            login_map["scenarios"][0]["selection_reason"] = "shared_code_changed_after_repair"
+            write_yaml(login / "acceptance-map.yaml", login_map)
+            write_text(account_pass, "ok\n")
+            result = run_script(
+                "acceptance_run.py",
+                "--project-root",
+                str(project),
+                "--unit",
+                "account",
+                "--acceptance-id",
+                acceptance_id,
+                "--repair-confirmed",
+                "--repair-note",
+                "fix account and re-evaluate shared authentication impact",
+                "--approved-file",
+                "src/account.py",
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            second_acceptance = parse_frontmatter(acceptance_report)
+            self.assertEqual(second_acceptance["status"], "pending")
+            run_two = parse_frontmatter(acceptance_report.parent / "runs" / "RUN-002.md")
+            self.assertEqual(run_two["parent_run"], "RUN-001")
+            self.assertTrue(run_two["repair_confirmed"])
+            self.assertEqual([item["unit"] for item in run_two["modules"]], ["account"])
+            self.assertIn("login | stale", acceptance_report.read_text(encoding="utf-8"))
+
+            result = run_script(
+                "acceptance_run.py",
+                "--project-root",
+                str(project),
+                "--unit",
+                "login",
+                "--acceptance-id",
+                acceptance_id,
+                "--repair-confirmed",
+                "--repair-note",
+                "rerun shared authentication impact",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            final_acceptance = parse_frontmatter(acceptance_report)
+            self.assertEqual(final_acceptance["status"], "accepted")
+            self.assertEqual(final_acceptance["latest_run_id"], "RUN-003")
+            acceptance_text = acceptance_report.read_text(encoding="utf-8")
+            self.assertIn("| RUN-001 | fail | initial_run | RUN-002 |", acceptance_text)
+            self.assertIn("| RUN-002 | incremental_pass | repair_rerun | RUN-003 |", acceptance_text)
+            self.assertIn("| RUN-003 | incremental_pass | repair_rerun |  |", acceptance_text)
+            self.assertTrue((account / "reports" / f"{acceptance_id}-RUN-001.md").is_file())
+            self.assertTrue((account / "reports" / f"{acceptance_id}-RUN-002.md").is_file())
+            account_latest = parse_frontmatter(account / "reports" / "latest.md")
+            login_latest = parse_frontmatter(login / "reports" / "latest.md")
+            self.assertEqual(account_latest["run_id"], "RUN-002")
+            self.assertEqual(login_latest["run_id"], "RUN-003")
+            self.assertEqual(account_latest["acceptance_status"], "accepted")
+            self.assertEqual(login_latest["acceptance_status"], "accepted")
+
+            result = run_script(
+                "acceptance_run.py",
+                "--project-root",
+                str(project),
+                "--unit",
+                "login",
+                "--acceptance-id",
+                acceptance_id,
+                "--repair-confirmed",
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("already accepted", result.stdout)
 
     def test_language_script_sets_remain_identical(self):
         en_scripts = ROOT / "bdd-atdd-acceptance-workflow-en" / "scripts"

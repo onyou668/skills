@@ -2,314 +2,300 @@
 
 ## Contents
 
+- Identity and layout
 - File lifecycle
-- Acceptance intake example
-- Feature example
-- acceptance-map.yaml contract
-- Test-generation protocol
-- Language and framework adapters
-- Real dependencies and context
-- Incremental impact selection
-- Execution and false-green prevention
-- Failure report and repair loop
+- Feature and module mapping
+- Report relationships
+- Code state, contract revision, and stale results
+- Multi-unit execution
+- Language, style, and real dependencies
+- Failure diagnosis and repair reruns
 - Script commands
+
+## Identity and Layout
+
+Use one hierarchy:
+
+```text
+Acceptance  one complete user-started acceptance lifecycle
+Run         one actual execution inside that Acceptance
+Unit        a business module executed in this Run
+Scenario    a business behavior in the Feature
+Case        one concrete Examples input
+```
+
+One Acceptance may cover multiple Units and contain multiple Runs after repairs:
+
+```text
+ACC-20260821T131530-a7c91f
+├── RUN-001  login pass / account fail
+├── RUN-002  account pass / login stale
+└── RUN-003  login pass / Acceptance accepted
+```
+
+Layout:
+
+```text
+.acceptance/
+  config.yaml
+  acceptances/
+    <acceptance-id>/
+      report.md
+      runs/
+        RUN-001.md
+        RUN-002.md
+  units/
+    <unit-id>/
+      acceptance.md
+      <unit-id>.feature
+      acceptance-map.yaml
+      reports/
+        latest.md
+        <acceptance-id>-<run-id>.md
+```
 
 ## File Lifecycle
 
-| File | Editor | Purpose |
+| File | Purpose | Mutability |
 |---|---|---|
-| `acceptance.md` | User or agent | Natural-language inputs, provenance, drafts, open questions |
-| `<unit>.feature` | User or agent after approval | Sole canonical business acceptance contract |
-| `acceptance-map.yaml` | Agent + scripts | Mapping between Feature, code entrypoints, tests, selectors, and run state |
-| Project test files | Agent, preserving manual regions | Executable integration/E2E acceptance implementation |
-| `reports/latest.md` | Runner + agent | Incremental result, evidence, diagnosis, and repair proposal |
+| `acceptance.md` | Natural-language intake, provenance, drafts, open questions | Maintained |
+| `<unit>.feature` | Sole canonical business acceptance contract | Maintained after approval |
+| `acceptance-map.yaml` | Feature, entrypoint, test, selector, selection, and latest-result mapping | Maintained |
+| Project test files | Real integration/E2E implementation | Preserve manual regions |
+| `acceptances/<id>/report.md` | Run index and current effective module state | Updated during Acceptance |
+| `runs/RUN-xxx.md` | One execution summary | Immutable after completion |
+| `units/<unit>/reports/<id>-<run>.md` | Detailed module evidence for one Run | Immutable after completion |
+| `units/<unit>/reports/latest.md` | Pointers to latest module, Run, and Acceptance reports | Atomically updated |
 
-After a Feature change, preserve old test paths but set `generated_tests_stale: true`. Clear stale only after executable tests are regenerated and recorded.
+Never delete failed history automatically after final success. Record `superseded_by` in the Acceptance summary to link an old Run to its successor.
 
-## Acceptance Intake Example
+## Feature and Module Mapping
 
-```markdown
-# login acceptance intake
-
-## Acceptance Scenarios
-
-### AC-LOGIN-004 Support QQ and 163 email login
-
-Status: active
-Source: spoken
-Priority: must
-Type: auto
-
-Given:
-- the user account exists and may sign in
-
-When:
-- the user signs in with a QQ or 163 email address
-
-Then:
-- email support-range validation passes
-- login continues to password validation
-- a valid email is not reported as malformed
-
-Data:
-- case_id=qq
-- case_id=163
-```
-
-`acceptance.md` may retain unapproved content. Only complete, approved criteria enter the active Feature.
-
-## Feature Example
+`acceptance.md` is intake only. The approved Feature is canonical:
 
 ```gherkin
 Feature: login
 
   @AC-LOGIN-004 @integration
-  Scenario Outline: Support confirmed email domains
-    Given the user account exists and may sign in
-    When the user signs in with <email>
-    Then email support-range validation passes
-    And login continues to password validation
-    And the response does not report a malformed email
+  Scenario Outline: support approved email domains
+    Given the account exists and may log in
+    When the user logs in with <email>
+    Then email support validation passes
+    And password validation continues
 
     Examples:
-      | case_id | email          |
-      | qq      | user@qq.com    |
-      | 163     | user@163.com   |
+      | case_id | email        |
+      | qq      | user@qq.com  |
+      | 163     | user@163.com |
 ```
 
-Each Examples row is a traceable Case. Do not place handlers, SQL, Redis keys, mocks, or commands in the Feature.
+Every Examples row has a stable `case_id`. Keep URLs, JSON, SQL, mocks, test paths, and commands out of Feature business semantics.
 
-## acceptance-map.yaml Contract
+Map protocol version 3:
 
 ```yaml
-version: 2
+version: 3
 unit: login
 feature: login.feature
+feature_hash: 9f9c31a8d482b9ef
+contract_revision: 2
 canonical_source: feature
 mode: manual
-
-project:
-  languages:
-    - go
-  test_frameworks:
-    - go test
-  modules:
-    go: backend/server
 
 execution_policy:
   incremental_only: true
   full_repository_run_forbidden_by_default: true
   real_middleware_required_unless_context_allows_mock: true
   production_code_fix_requires_confirmation: true
+  multi_unit_acceptance_supported: true
+  immutable_run_reports: true
+
+latest_acceptance_id: ACC-20260821T131530-a7c91f
+latest_run_id: RUN-003
+latest_result: incremental_pass
+latest_report: reports/ACC-20260821T131530-a7c91f-RUN-003.md
 
 scenarios:
   - id: AC-LOGIN-004
     status: active
-    selected: true
-    selection_reason: feature_added_or_changed
-    test_level: integration
-    case_ids:
-      - qq
-      - "163"
-
-    business_entrypoint:
-      type: http
-      method: POST
-      path: /api/auth/login
+    selected: false
+    selection_reason: accepted_current_change
+    case_ids: [qq, "163"]
+    business_entrypoint: POST /api/auth/login
     validation_entrypoint: AuthHandler.Login
-
     style_evidence:
-      - file: backend/server/internal/handlers/auth_handler_test.go
-        source: project_existing_test
-
+      - file: internal/handlers/auth_handler_test.go
     dependency_resolution:
       - name: mysql
         mode: real
         availability: available
-        evidence: docker-compose.test.yml
-      - name: redis
-        mode: real
-        availability: available
-        evidence: config/test.yaml
-
     assertion_mapping:
-      - then: email support-range validation passes
+      - then: email support validation passes
         test_assertion: response business code is not email_invalid
-      - then: the response does not report a malformed email
-        test_assertion: response error key differs from email_invalid
-
     generated_tests:
       - case_id: qq
-        file: backend/server/internal/handlers/login_acceptance_test.go
+        file: internal/handlers/login_acceptance_test.go
         symbol: TestAcceptanceLogin/AC-LOGIN-004/qq
-        language: go
-        framework: go-test
-        test_level: integration
-        discovery_command: cd backend/server && go test ./internal/handlers -list TestAcceptanceLogin
-        command: cd backend/server && go test -v ./internal/handlers -run "TestAcceptanceLogin/AC-LOGIN-004/qq" -count=1
-
+        discovery_command: go test ./internal/handlers -list TestAcceptanceLogin
+        command: go test ./internal/handlers -run TestAcceptanceLogin/AC-LOGIN-004/qq
     generated_tests_stale: false
 ```
 
-One Scenario may map to multiple test files, and one test file may contain generated regions for multiple Scenarios. Mapping is exact to Case and symbol.
+One Scenario may map to several test files, and one file may contain generated regions for several Scenarios. Map exact Cases, symbols, and commands.
 
-## Test-Generation Protocol
+## Report Relationships
 
-Collect before generation:
-
-```text
-Feature Scenario and Examples
-Business entrypoint and local validation entrypoint
-Tests in the same module
-Project test framework and CI commands
-Fixture / helper / assertion / cleanup style
-Real middleware configuration and availability
-Git diff, symbols, and call-path impact
-```
-
-Generated code includes at least:
-
-```text
-Stable Scenario / Case identifiers
-Real business entrypoint invocation
-Test-data setup and isolation
-Real dependencies or context-authorized mocks
-An assertion for every Then
-Side-effect and forbidden-side-effect assertions
-Cleanup
-A test symbol that can be discovered and run exactly
-```
-
-Never invent project helpers. If a shared helper is needed, show its scope first; add it only after approval and in the project's existing style.
-
-## Language and Framework Adapters
-
-| Stack | Typical style evidence | Exact execution candidate |
-|---|---|---|
-| Go/Gin/Echo | `_test.go`, table-driven tests, httptest, testcontainers | `go test <package> -run <scenario>` |
-| Python/FastAPI/Django | pytest fixtures, TestClient, async markers | `pytest <file> -k <case>` |
-| Node/TypeScript | Jest/Vitest/Mocha, supertest, Playwright | exact file plus `-t` / testNamePattern |
-| Java/Kotlin/Spring | JUnit, MockMvc, Gradle/Maven, Testcontainers | `-Dtest=...` or Gradle `--tests` |
-| Rust/Axum/Actix | `tests/`, tokio test, cargo test target | `cargo test --test <target> <filter>` |
-| Flutter | `integration_test`, widget/integration distinction | exact integration-test file and device |
-| .NET | xUnit/NUnit/MSTest, WebApplicationFactory | `dotnet test --filter ...` |
-
-These are candidates only. Inspect the repository first. Reuse an existing BDD runner; do not add one merely because the contract is a Feature.
-
-## Real Dependencies and Context
-
-Free-text examples:
-
-```yaml
-context: |
-  Acceptance connects to MySQL, Redis, and Kafka in local Docker.
-  Use the real business flow and do not use mocks.
-```
-
-```yaml
-context: |
-  MySQL and Redis use local test instances.
-  Only Kafka may use a fake.
-```
-
-The second example authorizes Kafka only. It does not authorize mocked Redis or MySQL.
-
-Real-mode preflight:
-
-```text
-Target is local/test/sandbox
-Health check succeeds
-Test identity and namespace are unique
-Cleanup is defined
-No paid message or production resource will be used
-```
-
-Invalid-input Scenarios still use the real flow. Compare state before and after to prove no side effect. If the contract requires proof of no access, use query audit, a proxy, or observable counters rather than a no-access mock.
-
-## Incremental Impact Selection
-
-`acceptance-map.yaml` is the reverse index. Map changed files and symbols to business/validation entrypoints, shared dependencies, and test files.
-
-Selection preview:
-
-```text
-baseline: main
-changed: internal/account/email_policy.go
-
-selected:
-- login / AC-LOGIN-004 / qq
-- login / AC-LOGIN-004 / 163
-
-not selected:
-- login / password scenarios
-- payment / all scenarios
-- profile / all scenarios
-```
-
-A shared authentication middleware change may select multiple units; that is still impact scope, not a full run. If impact is uncertain, stop and ask rather than substituting a full run.
-
-## Execution and False-Green Prevention
-
-Every generated test records a scoped discovery command. Execution order:
-
-```text
-Check map selected
--> check file and stale state
--> check context/middleware policy
--> scoped discovery proves symbol exists
--> run exact command
--> collect all selected Cases
--> write reports/latest.md
-```
-
-Reject bare `pytest`, `npm test`, `mvn test`, `cargo test`, and `go test ./...` by default. Even after explicit full-run authorization, prefer batching by unit and report the expanded scope.
-
-## Failure Report and Repair Loop
-
-Failure-report example:
+Acceptance report:
 
 ```markdown
-### AC-LOGIN-004/qq
+---
+acceptance_id: "ACC-20260821T131530-a7c91f"
+status: "accepted"
+latest_run_id: "RUN-003"
+scope_units: ["login","account"]
+contract_revision: 2
+contract_fingerprint: "..."
+code_state_id: "..."
+---
 
-- expected: qq.com passes email support-range validation
-- actual: business code email_invalid
-- evidence: response body and real DB/Redis state
-- failure_type: business_code
-- call_chain: POST /api/auth/login -> AuthHandler.Login -> EmailPolicy.IsAllowed
-- abnormal_code: the current allowed-domain set omits qq.com
-- proposed_repair: update the allowed set from the approved Feature and keep unapproved domains rejected
-- planned_files: internal/account/email_policy.go
-- repair_state: awaiting_fix_confirmation
+| Run | Status | Superseded by | Report |
+|---|---|---|---|
+| RUN-001 | fail | RUN-002 | runs/RUN-001.md |
+| RUN-002 | pending | RUN-003 | runs/RUN-002.md |
+| RUN-003 | incremental_pass | | runs/RUN-003.md |
 ```
 
-Inspect test, environment, and data correctness before blaming production code. Approval authorizes only the reported Scenarios and files. Record each repair iteration, changed files, commands, and result until `incremental_pass` or a blocker needs renewed approval.
+Each Run report lists only Units actually executed in that Run and links their module reports. Unselected Units do not enter that Run report and are not skip.
+
+Module report frontmatter includes at least:
+
+```yaml
+acceptance_id: ACC-20260821T131530-a7c91f
+run_id: RUN-003
+unit_id: login
+status: incremental_pass
+code_revision: 6202ea3
+code_state_id: 317f4c9a...
+feature_hash: 9f9c31a...
+contract_revision: 2
+map_hash: 66a2e...
+context_fingerprint: 72c0f...
+run_report: ../../../acceptances/.../runs/RUN-003.md
+acceptance_report: ../../../acceptances/.../report.md
+```
+
+`latest.md` stores pointers and current effective state only; it does not duplicate detailed evidence. Failed Runs remain immutable evidence.
+
+## Code State, Contract Revision, and Stale Results
+
+Before writing reports, every Run records:
+
+```text
+Git commit
+tracked diff excluding .acceptance
+relevant untracked file content
+code_state_id
+Feature contract fingerprint
+acceptance-map hash
+context fingerprint
+```
+
+Never store raw context, passwords, tokens, cookies, connection-string passwords, or other secrets in reports. Store redacted evidence and fingerprints only.
+
+Increment a Unit's `contract_revision` when Feature content changes, and mark changed Scenarios' tests and old results stale. Increment the Acceptance contract revision when its scope or Feature fingerprint changes.
+
+A prior pass remains reusable only while:
+
+```text
+Feature hash is unchanged
+test mapping is not stale
+Scenario is not selected again
+shared-code impact analysis did not reselect the Unit
+```
+
+Otherwise the Unit's effective status is stale and a later Run must execute it again.
+
+## Multi-Unit Execution
+
+Generate one `run_id` per execution and share it across every Unit in that Run. One Unit failure must not stop the others.
+
+Status rules:
+
+```text
+Every Unit in this Run passes                  -> Run incremental_pass
+Any fail/error/timeout                         -> Run fail
+No failure but uncertain exists                -> Run uncertain
+Other incomplete state                         -> Run pending
+
+Every scoped Unit has a current effective pass -> Acceptance accepted
+Otherwise                                      -> not accepted
+```
+
+Write immutable module and Run reports first, refresh the Acceptance summary next, and atomically update module `latest.md` pointers last.
+
+## Language, Style, and Real Dependencies
+
+Test generation order:
+
+1. Existing tests in the same module and acceptance level.
+2. Other tests in the same module.
+3. Integration tests using the same language and framework elsewhere.
+4. Project configuration, dependencies, and actual CI commands.
+5. If no style exists, the mainstream approach for the language/framework with recorded rationale.
+
+| Stack | Exact execution candidate |
+|---|---|
+| Go | `go test <package> -run <scenario>` |
+| Python | `pytest <file> -k <case>` |
+| Node/TypeScript | exact file plus `-t` |
+| Java/Kotlin | Maven `-Dtest` or Gradle `--tests` |
+| Rust | `cargo test --test <target> <filter>` |
+| Flutter | exact integration test file and device |
+| .NET | `dotnet test --filter ...` |
+
+Prefer real local/test/sandbox DB, Redis, Kafka/MQ, object storage, and similar dependencies. Allow mock only when free-text `context` explicitly authorizes it globally or for that named dependency. If a real dependency is unavailable, report environment error/pending; never silently fall back to mock.
+
+## Failure Diagnosis and Repair Reruns
+
+After a failed Run, report:
+
+```text
+Feature expectation and actual evidence
+failure_type
+call path, real file, and line
+current abnormal code logic
+root cause and confidence
+correct repair logic
+planned files before approval
+affected scope and rerun command
+repair_state: awaiting_fix_confirmation
+```
+
+After user approval, reuse the same `acceptance_id` and create the next Run. Record `parent_run`, `repair_confirmed`, `repair_note`, and `approved_files` in that Run report.
+
+Recompute impact after repair. If shared code affects a previously passing module, select it again. Never rerun only the failed module and combine it with a now-stale old pass.
+
+An approved Feature correction may remain in the same Acceptance, but every old Run is stale against the new contract. Start a new Acceptance for a separate requirement or after an already accepted lifecycle.
 
 ## Script Commands
 
 ```powershell
-# Collect a spoken criterion
-python <skill>/scripts/acceptance_sync.py --project-root . --unit login --criteria "..." --source spoken
+# First multi-unit Run: create acceptance_id and RUN-001
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --unit login --unit account
 
-# Manual preview; exit 2 means awaiting approval
-python <skill>/scripts/acceptance_compile.py --project-root . --unit login
+# First Run using a caller-provided Acceptance ID
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --acceptance-id ACC-20260821T131530-a7c91f `
+  --unit login --unit account
 
-# Write canonical Feature and module map after approval
-python <skill>/scripts/acceptance_compile.py --project-root . --unit login --confirmed
-
-# Validate and refresh a directly edited Feature
-python <skill>/scripts/acceptance_feature.py --project-root . --unit login --confirmed
-
-# Record one executable Case after the agent generates it
-python <skill>/scripts/acceptance_map.py --project-root . --unit login record-test `
-  --scenario AC-LOGIN-004 --case-id qq `
-  --file backend/server/internal/handlers/login_acceptance_test.go `
-  --symbol "TestAcceptanceLogin/AC-LOGIN-004/qq" `
-  --language go --framework go-test --test-level integration `
-  --discovery-command "cd backend/server && go test ./internal/handlers -list TestAcceptanceLogin" `
-  --command "cd backend/server && go test -v ./internal/handlers -run TestAcceptanceLogin/AC-LOGIN-004/qq -count=1"
-
-# Run selected Cases only after execution approval
-python <skill>/scripts/acceptance_run.py --project-root . --unit login
+# Approved repair: create the next Run under the same Acceptance
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --acceptance-id ACC-20260821T131530-a7c91f `
+  --unit account --unit login `
+  --repair-confirmed `
+  --repair-note "fix email policy and revalidate shared authentication" `
+  --approved-file internal/account/email_policy.go
 ```
 
-`--mode auto` authorizes automatic updates for that invocation. `acceptance_run.py --all` is allowed only after the user explicitly requests full acceptance for that unit; repository-wide execution needs separate explicit authorization.
+For multiple Units, pass `--scenario <unit>:<scenario-id>`. Without `--scenario`, execute only map entries with `selected: true`. Broad repository commands remain blocked by default.

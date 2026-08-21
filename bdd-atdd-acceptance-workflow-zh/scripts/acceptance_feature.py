@@ -162,6 +162,8 @@ def refresh_mapping(mapping: dict, parsed: list[dict]) -> dict:
                 "feature_missing": False,
             }
         )
+        if changed:
+            previous["latest_result"] = "stale"
         refreshed.append(previous)
         seen.add(scenario_id)
     for scenario_id, previous in existing.items():
@@ -201,7 +203,18 @@ def main() -> int:
     if args.mode == "manual" and not args.confirmed:
         print("Manual mode requires confirmation before refreshing generated mappings.")
         return 2
-    mapping = refresh_mapping(load_yaml(target_map), scenarios)
+    feature_text = read_text(target_feature)
+    mapping = load_yaml(target_map)
+    previous_feature_hash = str(mapping.get("feature_hash", ""))
+    current_feature_hash = hashlib.sha256(feature_text.encode("utf-8")).hexdigest()[:16]
+    previous_revision = int(mapping.get("contract_revision", 0) or 0)
+    contract_revision = previous_revision or 1
+    if previous_revision and previous_feature_hash != current_feature_hash:
+        contract_revision += 1
+    mapping = refresh_mapping(mapping, scenarios)
+    mapping["version"] = 3
+    mapping["feature_hash"] = current_feature_hash
+    mapping["contract_revision"] = contract_revision
     mapping["mode"] = args.mode
     write_yaml(target_map, mapping)
     print(f"Refreshed affected scenarios in {target_map}")

@@ -2,63 +2,76 @@
 
 ## 目录
 
+- 身份与目录
 - 文件生命周期
-- acceptance intake 示例
-- Feature 示例
-- acceptance-map.yaml 契约
-- 测试生成协议
-- 语言与框架适配
-- 真实依赖与 context
-- 增量影响选择
-- 执行与防假绿
-- 失败报告与修复循环
+- Feature 与模块映射
+- 报告关联
+- 代码状态、契约版本与 stale
+- 多模块执行
+- 语言、风格与真实依赖
+- 失败诊断与修复续跑
 - 脚本命令
+
+## 身份与目录
+
+统一层级：
+
+```text
+Acceptance  用户发起的一次完整验收闭环
+Run         该验收中的一次实际执行
+Unit        本轮实际运行的业务模块
+Scenario    Feature 中的业务行为
+Case        Examples 中的具体输入
+```
+
+一次 Acceptance 可以覆盖多个 Unit，也可以因失败修复产生多个 Run：
+
+```text
+ACC-20260821T131530-a7c91f
+├── RUN-001  login pass / account fail
+├── RUN-002  account pass / login stale
+└── RUN-003  login pass / Acceptance accepted
+```
+
+目录：
+
+```text
+.acceptance/
+  config.yaml
+  acceptances/
+    <acceptance-id>/
+      report.md
+      runs/
+        RUN-001.md
+        RUN-002.md
+  units/
+    <unit-id>/
+      acceptance.md
+      <unit-id>.feature
+      acceptance-map.yaml
+      reports/
+        latest.md
+        <acceptance-id>-<run-id>.md
+```
 
 ## 文件生命周期
 
-| 文件 | 编辑者 | 用途 |
+| 文件 | 用途 | 可变性 |
 |---|---|---|
-| `acceptance.md` | 用户或 Agent | 自然语言输入、来源、草稿、待确认问题 |
-| `<unit>.feature` | 用户确认后由用户或 Agent 更新 | 唯一正式业务验收标准 |
-| `acceptance-map.yaml` | Agent + 脚本 | Feature、代码入口、测试文件、selector 和运行状态映射 |
-| 项目测试文件 | Agent，保护人工区域 | 真实集成/E2E 验收实现 |
-| `reports/latest.md` | runner + Agent | 增量结果、证据、诊断和修复建议 |
+| `acceptance.md` | 自然语言输入、来源、草稿、待确认问题 | 可维护 |
+| `<unit>.feature` | 唯一正式业务验收标准 | 确认后维护 |
+| `acceptance-map.yaml` | Feature、入口、测试、selector、选择和最新结果映射 | 可维护 |
+| 项目测试文件 | 真实集成/E2E 验收实现 | 保护人工区域 |
+| `acceptances/<id>/report.md` | 整次验收的 Run 索引和当前模块有效状态 | 验收期间更新 |
+| `runs/RUN-xxx.md` | 一次运行总报告 | 完成后不可覆盖 |
+| `units/<unit>/reports/<id>-<run>.md` | 本轮该模块的详细证据 | 完成后不可覆盖 |
+| `units/<unit>/reports/latest.md` | 最近模块报告、Run 报告和 Acceptance 报告的指针 | 原子更新 |
 
-Feature 变化后，保留原测试路径但标记 `generated_tests_stale: true`。生成并登记新测试后才清除 stale。
+历史失败不得在最终通过后自动删除。验收总报告用 `superseded_by` 表示旧 Run 已被后续 Run 取代。
 
-## acceptance intake 示例
+## Feature 与模块映射
 
-```markdown
-# login 验收输入
-
-## 验收场景
-
-### AC-LOGIN-004 新增支持 QQ 和 163 邮箱登录
-
-状态: active
-来源: spoken
-优先级: must
-类型: auto
-
-Given:
-- 用户账号已存在并允许登录
-
-When:
-- 用户使用 QQ 或 163 邮箱登录
-
-Then:
-- 邮箱支持范围校验通过
-- 登录继续执行后续密码校验
-- 不把合法邮箱返回为格式错误
-
-Data:
-- case_id=qq
-- case_id=163
-```
-
-`acceptance.md` 可以保留未确认内容；只有完整且确认的场景进入 active Feature。
-
-## Feature 示例
+`acceptance.md` 只是 intake。确认后的 Feature 才是正式标准：
 
 ```gherkin
 Feature: login
@@ -69,247 +82,220 @@ Feature: login
     When 用户使用 <email> 登录
     Then 邮箱支持范围校验应当通过
     And 登录应当继续执行后续密码校验
-    And 不应返回邮箱格式错误
 
     Examples:
-      | case_id | email          |
-      | qq      | user@qq.com    |
-      | 163     | user@163.com   |
+      | case_id | email        |
+      | qq      | user@qq.com  |
+      | 163     | user@163.com |
 ```
 
-每一行 Examples 是一个可追踪 Case。不要在 Feature 中写 handler、SQL、Redis key、mock 或命令。
+每个 Examples 行必须有稳定 `case_id`。Feature 不写 URL、JSON、SQL、mock、测试文件或命令。
 
-## acceptance-map.yaml 契约
+映射协议 version 3：
 
 ```yaml
-version: 2
+version: 3
 unit: login
 feature: login.feature
+feature_hash: 9f9c31a8d482b9ef
+contract_revision: 2
 canonical_source: feature
 mode: manual
-
-project:
-  languages:
-    - go
-  test_frameworks:
-    - go test
-  modules:
-    go: houduan/server
 
 execution_policy:
   incremental_only: true
   full_repository_run_forbidden_by_default: true
   real_middleware_required_unless_context_allows_mock: true
   production_code_fix_requires_confirmation: true
+  multi_unit_acceptance_supported: true
+  immutable_run_reports: true
+
+latest_acceptance_id: ACC-20260821T131530-a7c91f
+latest_run_id: RUN-003
+latest_result: incremental_pass
+latest_report: reports/ACC-20260821T131530-a7c91f-RUN-003.md
 
 scenarios:
   - id: AC-LOGIN-004
     status: active
-    selected: true
-    selection_reason: feature_added_or_changed
-    test_level: integration
-    case_ids:
-      - qq
-      - "163"
-
-    business_entrypoint:
-      type: http
-      method: POST
-      path: /api/auth/login
+    selected: false
+    selection_reason: accepted_current_change
+    case_ids: [qq, "163"]
+    business_entrypoint: POST /api/auth/login
     validation_entrypoint: AuthHandler.Login
-
     style_evidence:
-      - file: houduan/server/internal/handlers/auth_handler_test.go
-        source: project_existing_test
-
+      - file: internal/handlers/auth_handler_test.go
     dependency_resolution:
       - name: mysql
         mode: real
         availability: available
-        evidence: docker-compose.test.yml
-      - name: redis
-        mode: real
-        availability: available
-        evidence: config/test.yaml
-
     assertion_mapping:
       - then: 邮箱支持范围校验应当通过
         test_assertion: response business code is not email_invalid
-      - then: 不应返回邮箱格式错误
-        test_assertion: response error key differs from email_invalid
-
     generated_tests:
       - case_id: qq
-        file: houduan/server/internal/handlers/login_acceptance_test.go
+        file: internal/handlers/login_acceptance_test.go
         symbol: TestAcceptanceLogin/AC-LOGIN-004/qq
-        language: go
-        framework: go-test
-        test_level: integration
-        discovery_command: cd houduan/server && go test ./internal/handlers -list TestAcceptanceLogin
-        command: cd houduan/server && go test -v ./internal/handlers -run "TestAcceptanceLogin/AC-LOGIN-004/qq" -count=1
-
+        discovery_command: go test ./internal/handlers -list TestAcceptanceLogin
+        command: go test ./internal/handlers -run TestAcceptanceLogin/AC-LOGIN-004/qq
     generated_tests_stale: false
 ```
 
-一个 Scenario 可以映射多个测试文件；一个测试文件也可以容纳多个 Scenario 的生成区域。映射必须精确到 Case 和 symbol。
+一个 Scenario 可以映射多个测试文件；一个测试文件也可以包含多个 Scenario 生成区域。必须精确到 Case、symbol 和命令。
 
-## 测试生成协议
+## 报告关联
 
-生成前收集：
-
-```text
-Feature 场景与 Examples
-业务入口和本地 validation entrypoint
-同模块测试文件
-项目测试框架与 CI 命令
-fixture / helper / assertion / cleanup 风格
-真实中间件配置与可用性
-Git diff、符号和调用链影响范围
-```
-
-生成代码至少包含：
-
-```text
-Scenario / Case 稳定标识
-真实业务入口调用
-数据准备和隔离
-真实依赖或 context 明确授权的 mock
-每条 Then 的断言
-副作用与无副作用断言
-清理逻辑
-可精确发现和运行的测试 symbol
-```
-
-禁止创建不存在的项目 helper。需要公共 helper 时，先说明新增范围；只在用户确认后添加，并遵循项目风格。
-
-## 语言与框架适配
-
-| 技术栈 | 常见风格证据 | 精确执行候选 |
-|---|---|---|
-| Go/Gin/Echo | `_test.go`、table-driven、httptest、testcontainers | `go test <package> -run <scenario>` |
-| Python/FastAPI/Django | pytest fixture、TestClient、async marker | `pytest <file> -k <case>` |
-| Node/TypeScript | Jest/Vitest/Mocha、supertest、Playwright | 指定文件并使用 `-t` / testNamePattern |
-| Java/Kotlin/Spring | JUnit、MockMvc、Gradle/Maven、Testcontainers | `-Dtest=...` 或 Gradle `--tests` |
-| Rust/Axum/Actix | `tests/`、tokio test、cargo test target | `cargo test --test <target> <filter>` |
-| Flutter | `integration_test`、widget/integration 区分 | 指定 integration test 文件和设备 |
-| .NET | xUnit/NUnit/MSTest、WebApplicationFactory | `dotnet test --filter ...` |
-
-表格只是候选。必须先读当前项目。项目已有 BDD Runner 就复用；没有时不要为了 Feature 强制引入新框架。
-
-## 真实依赖与 context
-
-自由文本示例：
-
-```yaml
-context: |
-  本项目验收连接本地 Docker 的 MySQL、Redis 和 Kafka。
-  全部走真实业务流程，不允许 mock。
-```
-
-```yaml
-context: |
-  MySQL 和 Redis 使用本地测试实例。
-  只有 Kafka 允许使用 fake。
-```
-
-第二个示例只授权 Kafka。不要把 Redis 或 MySQL 也改成 mock。
-
-真实模式预检：
-
-```text
-连接目标属于 local/test/sandbox
-健康检查成功
-测试身份和 namespace 唯一
-具备数据清理策略
-不会发送真实付费消息或访问生产资源
-```
-
-错误输入场景也使用真实流程。验证无副作用时比较执行前后状态；如果业务标准要求证明“没有访问”，使用查询审计、代理或可观测计数，不要替换成 no-access mock。
-
-## 增量影响选择
-
-`acceptance-map.yaml` 是反向索引。Agent 将变更文件和符号映射到 business/validation entrypoint、共享依赖和测试文件。
-
-选择预览示例：
-
-```text
-baseline: main
-changed: internal/account/email_policy.go
-
-selected:
-- login / AC-LOGIN-004 / qq
-- login / AC-LOGIN-004 / 163
-
-not selected:
-- login / password scenarios
-- payment / all scenarios
-- profile / all scenarios
-```
-
-共享认证中间件变化可能选中多个 unit；这仍是影响范围，不是全量。无法确定时暂停，不允许用全量运行代替分析。
-
-## 执行与防假绿
-
-每个 generated test 必须有 scoped discovery command。执行顺序：
-
-```text
-检查 map selected
--> 检查文件和 stale
--> 检查 context/middleware policy
--> scoped discovery 证明 symbol 存在
--> 执行 exact command
--> 收集所有选中 Case
--> 写 reports/latest.md
-```
-
-裸 `pytest`、`npm test`、`mvn test`、`cargo test` 和 `go test ./...` 默认拒绝。用户明确要求全量时也应优先按 unit 分批，报告实际扩大范围。
-
-## 失败报告与修复循环
-
-失败报告示例：
+Acceptance 总报告：
 
 ```markdown
-### AC-LOGIN-004/qq
+---
+acceptance_id: "ACC-20260821T131530-a7c91f"
+status: "accepted"
+latest_run_id: "RUN-003"
+scope_units: ["login","account"]
+contract_revision: 2
+contract_fingerprint: "..."
+code_state_id: "..."
+---
 
-- expected: qq.com 通过邮箱支持范围校验
-- actual: business code email_invalid
-- evidence: response body and real DB/Redis state
-- failure_type: business_code
-- call_chain: POST /api/auth/login -> AuthHandler.Login -> EmailPolicy.IsAllowed
-- abnormal_code: 当前允许域名集合缺少 qq.com
-- proposed_repair: 按已确认 Feature 更新允许集合，保留其他未确认域名为拒绝
-- planned_files: internal/account/email_policy.go
-- repair_state: awaiting_fix_confirmation
+| Run | Status | Superseded by | Report |
+|---|---|---|---|
+| RUN-001 | fail | RUN-002 | runs/RUN-001.md |
+| RUN-002 | pending | RUN-003 | runs/RUN-002.md |
+| RUN-003 | incremental_pass | | runs/RUN-003.md |
 ```
 
-Agent 必须先检查测试、环境和数据是否正确，不能看到 fail 就改生产代码。用户确认后，授权范围仅限报告列出的场景和文件。每次修复记录 iteration、changed files、commands 和 result，直到 `incremental_pass` 或出现需要重新授权的阻塞。
+每个 Run 总报告记录本轮实际执行的模块，并链接模块报告。未选择模块不进入本轮报告，也不记为 skip。
+
+模块报告 frontmatter 至少包含：
+
+```yaml
+acceptance_id: ACC-20260821T131530-a7c91f
+run_id: RUN-003
+unit_id: login
+status: incremental_pass
+code_revision: 6202ea3
+code_state_id: 317f4c9a...
+feature_hash: 9f9c31a...
+contract_revision: 2
+map_hash: 66a2e...
+context_fingerprint: 72c0f...
+run_report: ../../../acceptances/.../runs/RUN-003.md
+acceptance_report: ../../../acceptances/.../report.md
+```
+
+`latest.md` 只保留指针和当前有效状态，不复制详细证据。失败 Run 仍保留；日常查看从 latest 进入最新模块报告。
+
+## 代码状态、契约版本与 stale
+
+每个 Run 在写报告前记录：
+
+```text
+Git commit
+排除 .acceptance 后的 tracked diff
+相关 untracked 文件内容
+code_state_id
+Feature contract fingerprint
+acceptance-map hash
+context fingerprint
+```
+
+不得在报告中保存 context 原文、密码、Token、Cookie、连接串密码或其他秘密，只保存脱敏证据和 fingerprint。
+
+Feature 内容变化时递增模块 `contract_revision`，变化 Scenario 的旧测试和结果标记 stale。同一 Acceptance 的 scope 或 Feature fingerprint 变化时递增 Acceptance `contract_revision`。
+
+旧 pass 只有同时满足以下条件才可沿用：
+
+```text
+Feature hash 未变化
+测试映射未 stale
+Scenario 未重新 selected
+共享代码影响分析未重新选中该 Unit
+```
+
+任一条件不满足，模块有效状态是 stale，必须在后续 Run 重新执行。
+
+## 多模块执行
+
+一个 Run 生成一次 `run_id`，所有模块共享它。单模块失败不得中断其他模块。
+
+整体状态：
+
+```text
+本轮所有模块通过                         -> Run incremental_pass
+任一模块 fail/error/timeout              -> Run fail
+没有失败但存在 uncertain                 -> Run uncertain
+其余未完成                               -> Run pending
+
+Acceptance 所有 scope Unit 当前有效结果 pass -> accepted
+否则不得 accepted
+```
+
+运行报告和模块报告先写入不可变路径，随后刷新 Acceptance 总报告，最后原子更新各模块 `latest.md`。
+
+## 语言、风格与真实依赖
+
+测试生成顺序：
+
+1. 同模块、同验收层级已有测试。
+2. 同模块其他测试。
+3. 仓库内同语言、同框架集成测试。
+4. 项目配置、依赖和 CI 命令。
+5. 没有既有风格时采用对应语言和框架的主流方式，并记录推荐依据。
+
+| 技术栈 | 精确执行候选 |
+|---|---|
+| Go | `go test <package> -run <scenario>` |
+| Python | `pytest <file> -k <case>` |
+| Node/TypeScript | 指定文件并使用 `-t` |
+| Java/Kotlin | Maven `-Dtest` 或 Gradle `--tests` |
+| Rust | `cargo test --test <target> <filter>` |
+| Flutter | 指定 integration test 文件和设备 |
+| .NET | `dotnet test --filter ...` |
+
+真实 DB、Redis、Kafka/MQ、对象存储等必须优先使用 local/test/sandbox 配置。只有自由文本 `context` 明确授权全局或指定依赖时才允许 mock。真实依赖不可用时记 environment error/pending，不得静默降级 mock。
+
+## 失败诊断与修复续跑
+
+Run 失败后先报告：
+
+```text
+Feature 预期与实际证据
+failure_type
+调用链、真实文件和行号
+当前异常代码逻辑
+根因与可信度
+正确修复逻辑
+批准前计划修改的文件
+影响范围和重跑命令
+repair_state: awaiting_fix_confirmation
+```
+
+用户确认后，仍使用原 `acceptance_id`，新建下一个 Run。Run 报告记录 `parent_run`、`repair_confirmed`、`repair_note` 和 `approved_files`。
+
+修复后必须重新计算影响范围。若共享代码影响先前通过模块，重新 select 这些模块；不允许只重跑原失败模块并拼接旧 pass。
+
+Feature 纠正经过确认后可以留在同一 Acceptance，但所有旧 Run 对新 contract 都是 stale。新增独立业务需求或已 accepted 后再次验收，创建新的 Acceptance。
 
 ## 脚本命令
 
 ```powershell
-# 收集口述条件
-python <skill>/scripts/acceptance_sync.py --project-root . --unit login --criteria "..." --source spoken
+# 首次多模块运行：自动创建 acceptance_id 和 RUN-001
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --unit login --unit account
 
-# 手动模式预览；返回 2 表示等待确认
-python <skill>/scripts/acceptance_compile.py --project-root . --unit login
+# 使用指定 Acceptance ID 首次运行
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --acceptance-id ACC-20260821T131530-a7c91f `
+  --unit login --unit account
 
-# 用户确认后写正式 Feature 和模块映射
-python <skill>/scripts/acceptance_compile.py --project-root . --unit login --confirmed
-
-# 用户直接改 Feature 后校验与刷新
-python <skill>/scripts/acceptance_feature.py --project-root . --unit login --confirmed
-
-# Agent 生成真实测试后登记一个 Case
-python <skill>/scripts/acceptance_map.py --project-root . --unit login record-test `
-  --scenario AC-LOGIN-004 --case-id qq `
-  --file houduan/server/internal/handlers/login_acceptance_test.go `
-  --symbol "TestAcceptanceLogin/AC-LOGIN-004/qq" `
-  --language go --framework go-test --test-level integration `
-  --discovery-command "cd houduan/server && go test ./internal/handlers -list TestAcceptanceLogin" `
-  --command "cd houduan/server && go test -v ./internal/handlers -run TestAcceptanceLogin/AC-LOGIN-004/qq -count=1"
-
-# 用户确认执行后，只跑 selected Case
-python <skill>/scripts/acceptance_run.py --project-root . --unit login
+# 修复确认后，在同一 Acceptance 下创建下一次 Run
+python <skill>/scripts/acceptance_run.py --project-root . `
+  --acceptance-id ACC-20260821T131530-a7c91f `
+  --unit account --unit login `
+  --repair-confirmed `
+  --repair-note "修复邮箱策略并重新验证共享认证逻辑" `
+  --approved-file internal/account/email_policy.go
 ```
 
-`--mode auto` 是本次调用的自动更新授权。`acceptance_run.py --all` 只允许在用户明确要求该 unit 全量验收时使用；仓库全量仍需额外明确授权。
+多 Unit 使用 `--scenario <unit>:<scenario-id>`。未提供 `--scenario` 时只运行各模块 map 中 `selected: true` 的场景。裸全量命令仍默认拒绝。
